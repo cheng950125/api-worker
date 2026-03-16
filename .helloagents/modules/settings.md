@@ -19,6 +19,7 @@
 - 模型失败冷却以分钟计（默认 10 分钟），用于跳过最近失败的渠道/模型
 - 代理 CPU 降载相关开关使用环境变量（非 DB 设置）
 - `GET /api/settings` 额外返回 `runtime_config`（环境变量读取结果），用于展示流式 usage 解析与队列状态
+- 运行时配置默认值为 `PROXY_STREAM_USAGE_MODE=full`、`PROXY_STREAM_USAGE_MAX_BYTES=0`、`PROXY_STREAM_USAGE_MAX_PARSERS=0`
 - 运行时配置中 `PROXY_STREAM_USAGE_MAX_BYTES/PROXY_STREAM_USAGE_MAX_PARSERS` 设为 `0` 表示无限制
 
 ## 依赖关系

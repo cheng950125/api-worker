@@ -80,9 +80,9 @@ type ErrorDetails = {
 
 const FAILURE_COUNT_THRESHOLD = 2;
 
-const STREAM_USAGE_DEFAULT_MODE: StreamUsageMode = "lite";
-const STREAM_USAGE_DEFAULT_MAX_BYTES = 256 * 1024;
-const STREAM_USAGE_DEFAULT_MAX_PARSERS = 2;
+const STREAM_USAGE_DEFAULT_MODE: StreamUsageMode = "full";
+const STREAM_USAGE_DEFAULT_MAX_BYTES = 0;
+const STREAM_USAGE_DEFAULT_MAX_PARSERS = 0;
 
 let activeStreamUsageParsers = 0;
 

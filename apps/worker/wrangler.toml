@@ -2,14 +2,6 @@ name = "api-worker"
 main = "src/index.ts"
 compatibility_date = "2026-02-14"
 
-[vars]
-CORS_ORIGIN = "http://localhost:5173"
-PROXY_UPSTREAM_TIMEOUT_MS = "30000"
-PROXY_STREAM_USAGE_MODE = "lite"
-PROXY_STREAM_USAGE_MAX_BYTES = "262144"
-PROXY_STREAM_USAGE_MAX_PARSERS = "2"
-PROXY_USAGE_QUEUE_ENABLED = "true"
-
 [[d1_databases]]
 binding = "DB"
 database_name = "api-worker"
