@@ -126,7 +126,7 @@ const App = () => {
 		return pathToTab[normalized] ?? "dashboard";
 	});
 	const [loading, setLoading] = useState(false);
-	const [notice, setNotice] = useState<NoticeMessage | null>(null);
+	const [notices, setNotices] = useState<NoticeMessage[]>([]);
 	const [data, setData] = useState<AdminData>(initialData);
 	const [settingsForm, setSettingsForm] =
 		useState<SettingsForm>(initialSettingsForm);
@@ -159,6 +159,7 @@ const App = () => {
 	const [checkinLastRun, setCheckinLastRun] = useState<string | null>(null);
 	const [, setPendingActions] = useState<Set<string>>(() => new Set());
 	const pendingActionsRef = useRef<Set<string>>(new Set());
+	const noticeTimersRef = useRef<Map<number, number>>(new Map());
 	const [confirmState, setConfirmState] = useState<ConfirmState | null>(null);
 	const [confirmPending, setConfirmPending] = useState(false);
 
@@ -173,25 +174,52 @@ const App = () => {
 
 	const pushNotice = useCallback(
 		(tone: NoticeTone, message: string, durationMs?: number) => {
-			setNotice({ tone, message, id: Date.now(), durationMs });
+			setNotices((prev) => [
+				...prev,
+				{ tone, message, id: Date.now() + Math.random(), durationMs },
+			]);
 		},
 		[],
 	);
 
-	const dismissNotice = useCallback(() => {
-		setNotice(null);
+	const dismissNotice = useCallback((id?: number) => {
+		setNotices((prev) => {
+			if (id === undefined) {
+				return [];
+			}
+			return prev.filter((item) => item.id !== id);
+		});
 	}, []);
 
 	useEffect(() => {
-		if (!notice) {
-			return;
+		const timers = noticeTimersRef.current;
+		const activeIds = new Set(notices.map((item) => item.id));
+		for (const [id, timer] of timers) {
+			if (!activeIds.has(id)) {
+				window.clearTimeout(timer);
+				timers.delete(id);
+			}
 		}
-		const durationMs = notice.durationMs ?? 4500;
-		const timer = window.setTimeout(() => {
-			setNotice(null);
-		}, durationMs);
-		return () => window.clearTimeout(timer);
-	}, [notice]);
+		for (const notice of notices) {
+			if (timers.has(notice.id)) {
+				continue;
+			}
+			const durationMs = notice.durationMs ?? 4500;
+			const timer = window.setTimeout(() => {
+				dismissNotice(notice.id);
+			}, durationMs);
+			timers.set(notice.id, timer);
+		}
+	}, [dismissNotice, notices]);
+
+	useEffect(() => {
+		return () => {
+			for (const timer of noticeTimersRef.current.values()) {
+				window.clearTimeout(timer);
+			}
+			noticeTimersRef.current.clear();
+		};
+	}, []);
 
 	const startAction = useCallback((key: string) => {
 		if (pendingActionsRef.current.has(key)) {
@@ -1326,6 +1354,7 @@ const App = () => {
 		() => tabs.find((tab) => tab.id === activeTab)?.label ?? "管理台",
 		[activeTab],
 	);
+	const loginNotice = notices[notices.length - 1] ?? null;
 
 	const renderContent = () => {
 		if (loading) {
@@ -1440,6 +1469,7 @@ const App = () => {
 				<SettingsView
 					settingsForm={settingsForm}
 					adminPasswordSet={data.settings?.admin_password_set ?? false}
+					runtimeConfig={data.settings?.runtime_config ?? null}
 					isSaving={isActionPending(buildActionKey("settings:submit"))}
 					onSubmit={handleSettingsSubmit}
 					onFormChange={handleSettingsFormChange}
@@ -1458,7 +1488,7 @@ const App = () => {
 					activeTab={activeTab}
 					activeLabel={activeLabel}
 					token={token}
-					notice={notice}
+					notices={notices}
 					onDismissNotice={dismissNotice}
 					onTabChange={handleTabChange}
 					onLogout={handleLogout}
@@ -1468,7 +1498,7 @@ const App = () => {
 			) : (
 				<LoginView
 					isSubmitting={isActionPending(buildActionKey("login:submit"))}
-					notice={notice}
+					notice={loginNotice}
 					onSubmit={handleLogin}
 				/>
 			)}
@@ -1476,7 +1506,7 @@ const App = () => {
 				<div class="fixed inset-0 z-50">
 					<button
 						aria-label="关闭弹窗"
-						class="absolute inset-0 bg-slate-950/40"
+						class="absolute inset-0 bg-slate-950/60"
 						type="button"
 						onClick={closeConfirm}
 					/>

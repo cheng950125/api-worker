@@ -5,8 +5,8 @@ type AppLayoutProps = {
 	activeTab: TabId;
 	activeLabel: string;
 	token: string | null;
-	notice: NoticeMessage | null;
-	onDismissNotice: () => void;
+	notices: NoticeMessage[];
+	onDismissNotice: (id: number) => void;
 	onTabChange: (tabId: TabId) => void;
 	onLogout: () => void;
 	children?: unknown;
@@ -26,7 +26,7 @@ export const AppLayout = ({
 	activeTab,
 	activeLabel,
 	token,
-	notice,
+	notices,
 	onDismissNotice,
 	onTabChange,
 	onLogout,
@@ -44,7 +44,6 @@ export const AppLayout = ({
 		error: "错误",
 		info: "信息",
 	};
-	const noticeDuration = notice?.durationMs ?? 4500;
 	const closeMobileNav = () => {
 		const toggle = document.querySelector<HTMLInputElement>("#app-nav-toggle");
 		if (toggle) {
@@ -163,32 +162,34 @@ export const AppLayout = ({
 				</div>
 				{children}
 			</main>
-			{notice && (
-				<output
-					aria-live="polite"
-					class="app-toast"
-					style={`--toast-duration: ${noticeDuration}ms`}
-				>
-					<div class={`app-toast-card ${noticeToneStyles[notice.tone]}`}>
-						<div class="flex items-start justify-between gap-3">
-							<div>
-								<span class="app-chip text-[10px]">
-									{noticeToneLabel[notice.tone]}
-								</span>
-								<div class="mt-1 text-sm font-semibold text-[color:var(--app-ink)]">
-									{notice.message}
+			{notices.length > 0 && (
+				<output aria-live="polite" class="app-toast">
+					{notices.map((notice) => (
+						<div
+							class={`app-toast-card ${noticeToneStyles[notice.tone]}`}
+							key={notice.id}
+							style={`--toast-duration: ${notice.durationMs ?? 4500}ms`}
+						>
+							<div class="flex items-start justify-between gap-3">
+								<div>
+									<span class="app-chip text-[10px]">
+										{noticeToneLabel[notice.tone]}
+									</span>
+									<div class="mt-1 text-sm font-semibold text-[color:var(--app-ink)]">
+										{notice.message}
+									</div>
 								</div>
+								<button
+									class="app-button app-focus h-8 px-3 text-[11px]"
+									type="button"
+									onClick={() => onDismissNotice(notice.id)}
+								>
+									关闭
+								</button>
 							</div>
-							<button
-								class="app-button app-focus h-8 px-3 text-[11px]"
-								type="button"
-								onClick={onDismissNotice}
-							>
-								关闭
-							</button>
+							<span aria-hidden="true" class="app-toast-progress" />
 						</div>
-						<span aria-hidden="true" class="app-toast-progress" />
-					</div>
+					))}
 				</output>
 			)}
 			<button

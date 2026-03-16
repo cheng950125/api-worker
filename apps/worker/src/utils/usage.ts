@@ -11,6 +11,19 @@ export type StreamUsage = {
 	firstTokenLatencyMs: number | null;
 };
 
+export type StreamUsageMode = "full" | "lite" | "off";
+
+export type StreamUsageOptions = {
+	mode?: StreamUsageMode;
+	maxBytes?: number;
+};
+
+const USAGE_HINTS = [
+	"\"usage\"",
+	"\"usageMetadata\"",
+	"\"usage_metadata\"",
+];
+
 function toNumber(value: unknown): number | null {
 	if (value === null || value === undefined) {
 		return null;
@@ -152,20 +165,42 @@ export function parseUsageFromHeaders(
 
 export async function parseUsageFromSse(
 	response: Response,
+	options: StreamUsageOptions = {},
 ): Promise<StreamUsage> {
 	if (!response.body) {
 		return { usage: null, firstTokenLatencyMs: null };
 	}
+	const mode: StreamUsageMode = options.mode ?? "full";
+	if (mode === "off") {
+		return { usage: null, firstTokenLatencyMs: null };
+	}
+	const maxBytes =
+		typeof options.maxBytes === "number" && options.maxBytes > 0
+			? options.maxBytes
+			: Number.POSITIVE_INFINITY;
 	const reader = response.body.getReader();
 	const decoder = new TextDecoder();
 	let buffer = "";
 	let usage: NormalizedUsage | null = null;
 	const start = Date.now();
 	let firstTokenLatencyMs: number | null = null;
+	let bytesRead = 0;
+
+	const payloadMayContainUsage = (payload: string): boolean => {
+		if (!payload) {
+			return false;
+		}
+		return USAGE_HINTS.some((hint) => payload.includes(hint));
+	};
 
 	while (true) {
 		const { done, value } = await reader.read();
 		if (done) {
+			break;
+		}
+		bytesRead += value?.byteLength ?? 0;
+		if (bytesRead > maxBytes) {
+			await reader.cancel();
 			break;
 		}
 		buffer += decoder.decode(value, { stream: true });
@@ -179,10 +214,18 @@ export async function parseUsageFromSse(
 					if (firstTokenLatencyMs === null) {
 						firstTokenLatencyMs = Date.now() - start;
 					}
+					if (mode === "lite" && !payloadMayContainUsage(payload)) {
+						newlineIndex = buffer.indexOf("\n");
+						continue;
+					}
 					const parsed = safeJsonParse<unknown>(payload, null);
 					const candidate = parseUsageFromJson(parsed);
 					if (candidate) {
 						usage = candidate;
+						if (mode === "lite") {
+							await reader.cancel();
+							return { usage, firstTokenLatencyMs };
+						}
 					}
 				}
 			}
@@ -196,6 +239,9 @@ export async function parseUsageFromSse(
 		if (payload && payload !== "[DONE]") {
 			if (firstTokenLatencyMs === null) {
 				firstTokenLatencyMs = Date.now() - start;
+			}
+			if (mode === "lite" && !payloadMayContainUsage(payload)) {
+				return { usage, firstTokenLatencyMs };
 			}
 			const parsed = safeJsonParse<unknown>(payload, null);
 			const candidate = parseUsageFromJson(parsed);

@@ -260,6 +260,23 @@ jobs:
         if: steps.check-db.outputs.db_exists != 'true'
         run: bunx wrangler telemetry disable
 
+      - name: Create or verify Queue
+        if: steps.check-db.outputs.db_exists != 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          echo "检查并创建 Queue..."
+          QUEUE_LIST=$(bunx wrangler queues list --json --config apps/worker/wrangler.toml 2>/dev/null || echo "[]")
+          EXISTING_QUEUE=$(echo "$QUEUE_LIST" | jq -r '.[] | select(.name=="usage-events") | .name')
+
+          if [ -n "$EXISTING_QUEUE" ]; then
+            echo "✅ Queue 已存在: usage-events"
+          else
+            echo "创建 Queue: usage-events"
+            bunx wrangler queues create usage-events --config apps/worker/wrangler.toml
+          fi
+
       - name: Create D1 database (init only)
         if: steps.check-db.outputs.db_exists != 'true'
         env:
@@ -358,6 +375,23 @@ jobs:
 
       - name: Disable wrangler telemetry
         run: bunx wrangler telemetry disable
+
+      - name: Create or verify Queue
+        if: needs.check-config.outputs.deploy_worker == 'true' || needs.check-config.outputs.should_migrate == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          echo "检查并创建 Queue..."
+          QUEUE_LIST=$(bunx wrangler queues list --json --config apps/worker/wrangler.toml 2>/dev/null || echo "[]")
+          EXISTING_QUEUE=$(echo "$QUEUE_LIST" | jq -r '.[] | select(.name=="usage-events") | .name')
+
+          if [ -n "$EXISTING_QUEUE" ]; then
+            echo "✅ Queue 已存在: usage-events"
+          else
+            echo "创建 Queue: usage-events"
+            bunx wrangler queues create usage-events --config apps/worker/wrangler.toml
+          fi
 
       - name: Create or verify D1 Database
         if: needs.check-config.outputs.deploy_worker == 'true' || needs.check-config.outputs.deploy_ui == 'true' || needs.check-config.outputs.should_migrate == 'true'

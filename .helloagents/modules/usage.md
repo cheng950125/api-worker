@@ -10,6 +10,8 @@
 
 ## 行为规范
 - 代理调用统一写入 `usage_logs`（含无可用渠道/冷却提前返回）
+- 使用日志可通过 `USAGE_QUEUE` 异步写入（可能存在短暂延迟）
+- 流式 usage 解析被跳过或超限时会记录 `usage_skipped/usage_missing` 以便排查
 - 保留天数可配置，查询时触发清理
 - 查询结果附带渠道与令牌名称
 - `GET /api/usage` 支持 `offset/limit` 分页并返回 `total`

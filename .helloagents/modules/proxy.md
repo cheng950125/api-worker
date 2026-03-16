@@ -19,9 +19,12 @@
 - done-hub 仅使用 `base_url`，不再按多地址切换
 - 支持从非流式 JSON、响应头与流式 SSE（含 `response.usage` 与 `usageMetadata`）解析 usage 字段
 - 流式请求自动补 `stream_options.include_usage=true` 以便上游返回 usage
+- 流式 usage 解析支持 `full/lite/off` 模式（`lite` 仅解析包含 usage 的事件，并可限制最大扫描字节）
 - 对 `/v1/responses` 且上游返回 400/404 时回退为 `/responses` 重试一次
 - 可配置失败重试轮询（响应 5xx/429 时触发）
 - 记录流式请求标记、首 token 延迟与推理强度到 usage_logs
+- 使用日志与模型能力写入可通过 `USAGE_QUEUE` 异步化（队列不可用时自动回退同步写入）
+- 当 usage 解析被跳过或超限时，会记录 `usage_skipped/usage_missing` 用于可观测性
 - 上游类型由 `metadata_json.site_type` 决定（`openai/anthropic/gemini`，其他类型视为 openai 兼容）
 - 允许 `metadata_json.model_mapping` 将下游模型映射为上游模型
 - 允许 `metadata_json.endpoint_overrides` 覆盖 chat/embedding/image 上游地址（可用 `{model}` 占位）
@@ -34,6 +37,8 @@
 - 仅 429/5xx/408/timeout/exception 计入冷却，4xx 请求错误不触发冷却
 - 映射模型场景失败时同时记录下游模型错误，确保冷却窗口生效
 - 上游成功响应会刷新能力表，清空错误并延长可用窗口
+- CPU 保护开关（环境变量）: `PROXY_STREAM_USAGE_MODE`, `PROXY_STREAM_USAGE_MAX_BYTES`, `PROXY_STREAM_USAGE_MAX_PARSERS`, `PROXY_USAGE_QUEUE_ENABLED`
+- `PROXY_STREAM_USAGE_MAX_BYTES` 与 `PROXY_STREAM_USAGE_MAX_PARSERS` 设为 `0` 表示无限制（未配置则使用默认值）
 
 ## 依赖关系
 - `channels` / `tokens` / `usage_logs` 表

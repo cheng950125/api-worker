@@ -101,6 +101,16 @@ export type Settings = {
 	admin_password_set?: boolean;
 	checkin_schedule_time?: string;
 	model_failure_cooldown_minutes?: number;
+	runtime_config?: RuntimeProxyConfig;
+};
+
+export type RuntimeProxyConfig = {
+	stream_usage_mode: string;
+	stream_usage_max_bytes: number;
+	stream_usage_max_parsers: number;
+	usage_queue_enabled: boolean;
+	usage_queue_bound: boolean;
+	usage_queue_active: boolean;
 };
 
 export type ModelChannel = {

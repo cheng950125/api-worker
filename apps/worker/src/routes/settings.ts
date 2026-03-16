@@ -9,6 +9,7 @@ import {
 	getRetentionDays,
 	getSessionTtlHours,
 	getModelFailureCooldownMinutes,
+	getRuntimeProxyConfig,
 	isAdminPasswordSet,
 	setAdminPasswordHash,
 	setCheckinScheduleTime,
@@ -38,6 +39,7 @@ settings.get("/", async (c) => {
 		admin_password_set: adminPasswordSet,
 		checkin_schedule_time: checkinScheduleTime,
 		model_failure_cooldown_minutes: modelFailureCooldownMinutes,
+		runtime_config: getRuntimeProxyConfig(c.env),
 	});
 });
 

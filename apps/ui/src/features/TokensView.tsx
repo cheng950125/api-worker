@@ -412,7 +412,7 @@ export const TokensView = ({
 				<div class="fixed inset-0 z-50">
 					<button
 						aria-label="关闭弹窗"
-						class="absolute inset-0 bg-slate-950/40"
+						class="absolute inset-0 bg-slate-950/60"
 						type="button"
 						onClick={onCloseModal}
 					/>

@@ -2,8 +2,20 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **[deploy-workflow]**: 新增本地一键部署脚本（init/update） — by lsy
+  - 方案: [202603161914_local-deploy-script](archive/2026-03/202603161914_local-deploy-script/)
+
 ### 变更
 
+- **[deploy-workflow]**: 本地部署脚本改为纯本地流程（构建 + 本地迁移） — by lsy
+  - 方案: [202603162008_local-deploy-local-only](archive/2026-03/202603162008_local-deploy-local-only/)
+- **[settings/admin-ui]**: 设置接口返回运行时配置，管理台只读展示并指引环境变量配置
+  - 方案: [202603161748_settings-runtime-env-display](archive/2026-03/202603161748_settings-runtime-env-display/)
+- **[deploy-workflow]**: 部署流程自动创建 `usage-events` Queue（存在则跳过） — by lsy
+  - 方案: [202603161714_deploy-create-queue](archive/2026-03/202603161714_deploy-create-queue/)
+  - 决策: deploy-create-queue#D001(CI 自动创建队列)
 - **[admin-ui/dashboard]**: Dashboard 样板页引入 Apple 风主题（bento grid 卡片/表格/按钮重绘）
   - 方案: [202603152243_apple-ui-sample-dashboard](archive/2026-03/202603152243_apple-ui-sample-dashboard/)
   - 文件: apps/ui/src/features/DashboardView.tsx, apps/ui/src/styles.css, .helloagents/modules/admin-ui.md, .helloagents/modules/dashboard.md
@@ -20,6 +32,8 @@
 
 ### 微调
 
+- **[proxy/settings]**: 流式 usage 解析上限支持 `0` 表示无限制 — by lsy
+  - 方案: [202603161849_stream-usage-unlimited](archive/2026-03/202603161849_stream-usage-unlimited/)
 - **[worker/models]**: 引入通道模型能力表并基于“模型广场测试结果+可配置TTL（默认2小时）”进行模型发布与路由匹配
   - 类型: 微调（无方案包）
   - 文件: apps/worker/migrations/0004_add_channel_model_capabilities.sql, apps/worker/src/services/channel-model-capabilities.ts, apps/worker/src/services/channel-testing.ts, apps/worker/src/services/settings.ts, apps/worker/src/routes/settings.ts, apps/worker/src/routes/models.ts, apps/worker/src/routes/newapiUsers.ts, apps/worker/src/routes/proxy.ts, tests/worker/channel-model-capabilities.test.ts, tests/worker/newapi.test.ts, helloagents/modules/settings.md, helloagents/modules/models.md, helloagents/modules/proxy.md
@@ -179,6 +193,46 @@
 - **[admin-ui]**: Toast 通知固定右上并带进度条，弹窗改为全屏遮罩，筛选标题横排 — by lsy
   - 方案: [202603160049_modal-toast-search-fixes](archive/2026-03/202603160049_modal-toast-search-fixes/)
   - 决策: modal-toast-search-fixes#D001(通知统一为右上 Toast)
+
+### 快速修改
+
+- **[tooling]**: dev 脚本适配 bun 可执行路径解析 — by lsy
+  - 类型: 快速修改（无方案包）
+  - 文件: scripts/dev.mjs
+- **[deploy-workflow]**: 本地部署脚本适配 bun 可执行路径解析 — by lsy
+  - 类型: 快速修改（无方案包）
+  - 文件: scripts/deploy.mjs
+- **[tooling]**: 将 `dev:all` 简化为 `dev` 脚本 — by lsy
+  - 类型: 快速修改（无方案包）
+  - 文件: package.json, README.md
+- **[deploy-workflow]**: 缺少环境变量时 .env 优先从 .env.example 生成 — by lsy
+  - 类型: 快速修改（无方案包）
+  - 文件: scripts/deploy.mjs, .helloagents/modules/deploy-workflow.md
+- **[deploy-workflow]**: .env.example 注释改为中文并补充默认代理配置 — by lsy
+  - 类型: 快速修改（无方案包）
+  - 文件: .env.example
+- **[deploy-workflow]**: 本地部署脚本补充 .env 占位与 .env.example 模板 — by lsy
+  - 类型: 快速修改（无方案包）
+  - 文件: scripts/deploy.mjs, .env.example, .helloagents/modules/deploy-workflow.md, README.md
+- **[deploy-workflow]**: 本地部署脚本未传参时支持交互选择 — by lsy
+  - 类型: 快速修改（无方案包）
+  - 文件: scripts/deploy.mjs, README.md, .helloagents/modules/deploy-workflow.md
+- **[deploy-workflow]**: 增加本地部署脚本的 package scripts 快捷入口 — by lsy
+  - 类型: 快速修改（无方案包）
+  - 文件: package.json, README.md
+- **[docs]**: README 补充系统设置的运行时环境变量说明
+  - 类型: 快速修改（无方案包）
+  - 文件: README.md
+- **[admin-ui]**: 加深弹窗遮罩并支持多条通知弹窗，使用日志表头遮罩更清晰 — by lsy
+  - 类型: 快速修改（无方案包）
+  - 文件: apps/ui/src/App.tsx:129-220,1357-1510, apps/ui/src/features/AppLayout.tsx:1-195, apps/ui/src/features/SitesView.tsx:582, apps/ui/src/features/TokensView.tsx:415, apps/ui/src/features/UsageView.tsx:209-219,377, apps/ui/src/styles.css:424-440
+
+## [0.9.7] - 2026-03-16
+
+### 变更
+- **[proxy/usage]**: 引入 usage 队列异步写入与流式解析降载，增加 CPU 降载开关 — by lsy
+  - 方案: [202603161542_proxy-cpu-limit-mitigation](archive/2026-03/202603161542_proxy-cpu-limit-mitigation/)
+  - 决策: proxy-cpu-limit-mitigation#D001(用量写入异步化策略)
 
 ## [0.9.6] - 2026-03-15
 

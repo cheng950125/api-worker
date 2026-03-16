@@ -206,17 +206,17 @@ export const UsageView = ({
 						<table class="app-table min-w-[960px] w-full text-xs sm:text-sm">
 							<thead>
 								<tr>
-									<th class="sticky top-0 bg-white/70">时间</th>
-									<th class="sticky top-0 bg-white/70">模型</th>
-									<th class="sticky top-0 bg-white/70">渠道</th>
-									<th class="sticky top-0 bg-white/70">令牌</th>
-									<th class="sticky top-0 bg-white/70">输入 Tokens</th>
-									<th class="sticky top-0 bg-white/70">输出 Tokens</th>
-									<th class="sticky top-0 bg-white/70">用时 (s)</th>
-									<th class="sticky top-0 bg-white/70">首 token 延迟 (s)</th>
-									<th class="sticky top-0 bg-white/70">流式</th>
-									<th class="sticky top-0 bg-white/70">推理强度</th>
-									<th class="sticky top-0 bg-white/70">状态码</th>
+									<th class="sticky top-0 bg-slate-100/90">时间</th>
+									<th class="sticky top-0 bg-slate-100/90">模型</th>
+									<th class="sticky top-0 bg-slate-100/90">渠道</th>
+									<th class="sticky top-0 bg-slate-100/90">令牌</th>
+									<th class="sticky top-0 bg-slate-100/90">输入 Tokens</th>
+									<th class="sticky top-0 bg-slate-100/90">输出 Tokens</th>
+									<th class="sticky top-0 bg-slate-100/90">用时 (s)</th>
+									<th class="sticky top-0 bg-slate-100/90">首 token 延迟 (s)</th>
+									<th class="sticky top-0 bg-slate-100/90">流式</th>
+									<th class="sticky top-0 bg-slate-100/90">推理强度</th>
+									<th class="sticky top-0 bg-slate-100/90">状态码</th>
 								</tr>
 							</thead>
 							<tbody>
@@ -374,7 +374,7 @@ export const UsageView = ({
 				<div class="fixed inset-0 z-50">
 					<button
 						aria-label="关闭弹窗"
-						class="absolute inset-0 bg-slate-950/40"
+						class="absolute inset-0 bg-slate-950/60"
 						type="button"
 						onClick={closeErrorModal}
 					/>

@@ -86,6 +86,7 @@ bun run dev:worker
 - 日志保留天数（默认 30）
 - 会话时长（小时，默认 12）
 - 管理员密码（首次登录在登录页输入密码将自动设置，可在系统设置中修改）
+- 运行时配置（只读，来自环境变量）：`PROXY_STREAM_USAGE_MODE`、`PROXY_STREAM_USAGE_MAX_BYTES`、`PROXY_STREAM_USAGE_MAX_PARSERS`、`PROXY_USAGE_QUEUE_ENABLED`（需在部署环境中修改）
 
 ### 3) 启动管理台 UI
 
@@ -114,6 +115,39 @@ bun run --filter api-worker db:migrate
 - `bun run typecheck`
 - `bun run lint`
 - `bun run format`
+- `bun run dev` 同时启动 Worker 与 UI
+
+## 本地一键部署脚本
+
+脚本位置：`scripts/deploy.mjs`，用于在本地复刻 GitHub Actions 的 init/update 部署流程。
+
+前置环境：
+
+- Bun（确保 `bun`/`bunx` 可用）
+- Wrangler（通过 `bunx wrangler` 使用）
+- `.env.example` 可作为本地环境变量模板（可选）
+
+常用命令：
+
+```bash
+node scripts/deploy.mjs init
+node scripts/deploy.mjs update --target auto --migrate auto
+```
+
+或使用 package scripts：
+
+```bash
+bun run deploy:init
+bun run deploy:update -- --target auto --migrate auto
+```
+
+说明：
+
+- 该脚本仅执行本地流程（构建 + 本地迁移），不会触发远程部署
+- `init` 会强制执行本地迁移
+- `update` 默认按变更范围决定是否迁移（无法检测时会默认迁移）
+- `bun run deploy` 会进入交互选择（init/update、部署目标、迁移策略）
+- 若 `.env` 不存在，会自动从 `.env.example` 生成（或创建空文件）
 
 ## API 接口
 

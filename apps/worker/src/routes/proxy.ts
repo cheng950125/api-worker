@@ -19,8 +19,6 @@ import {
 import {
 	listCoolingDownChannelsForModel,
 	listVerifiedModelsByChannel,
-	recordChannelModelError,
-	upsertChannelModelCapabilities,
 } from "../services/channel-model-capabilities";
 import {
 	getModelFailureCooldownMinutes,
@@ -42,7 +40,7 @@ import {
 	parseDownstreamModel,
 	parseDownstreamStream,
 } from "../services/provider-transform";
-import { recordUsage } from "../services/usage";
+import { processUsageQueueEvent, type UsageQueueEvent } from "../services/usage-queue";
 import { jsonError } from "../utils/http";
 import { safeJsonParse } from "../utils/json";
 import { extractReasoningEffort } from "../utils/reasoning";
@@ -52,6 +50,8 @@ import {
 	parseUsageFromHeaders,
 	parseUsageFromJson,
 	parseUsageFromSse,
+	type StreamUsageMode,
+	type StreamUsageOptions,
 } from "../utils/usage";
 import { adaptChatResponse } from "../services/chat-response-adapter";
 
@@ -80,6 +80,12 @@ type ErrorDetails = {
 
 const FAILURE_COUNT_THRESHOLD = 2;
 
+const STREAM_USAGE_DEFAULT_MODE: StreamUsageMode = "lite";
+const STREAM_USAGE_DEFAULT_MAX_BYTES = 256 * 1024;
+const STREAM_USAGE_DEFAULT_MAX_PARSERS = 2;
+
+let activeStreamUsageParsers = 0;
+
 function normalizeMessage(value: string | null): string | null {
 	if (!value) {
 		return null;
@@ -89,6 +95,73 @@ function normalizeMessage(value: string | null): string | null {
 		return null;
 	}
 	return trimmed;
+}
+
+function parseNonNegativeInt(value: string | undefined): number | null {
+	if (value === undefined || value === null || value === "") {
+		return null;
+	}
+	const parsed = Number(value);
+	if (Number.isFinite(parsed) && parsed >= 0) {
+		return Math.floor(parsed);
+	}
+	return null;
+}
+
+function normalizeStreamUsageMode(value: string | undefined): StreamUsageMode {
+	const normalized = (value ?? "").toLowerCase();
+	if (normalized === "off") {
+		return "off";
+	}
+	if (normalized === "full") {
+		return "full";
+	}
+	return STREAM_USAGE_DEFAULT_MODE;
+}
+
+function getStreamUsageOptions(env: AppEnv["Bindings"]): StreamUsageOptions {
+	const maxBytesRaw = parseNonNegativeInt(env.PROXY_STREAM_USAGE_MAX_BYTES);
+	return {
+		mode: normalizeStreamUsageMode(env.PROXY_STREAM_USAGE_MODE),
+		maxBytes:
+			maxBytesRaw === null ? STREAM_USAGE_DEFAULT_MAX_BYTES : maxBytesRaw,
+	};
+}
+
+function getStreamUsageMaxParsers(env: AppEnv["Bindings"]): number {
+	const maxParsersRaw = parseNonNegativeInt(env.PROXY_STREAM_USAGE_MAX_PARSERS);
+	if (maxParsersRaw === null) {
+		return STREAM_USAGE_DEFAULT_MAX_PARSERS;
+	}
+	if (maxParsersRaw === 0) {
+		return Number.POSITIVE_INFINITY;
+	}
+	return maxParsersRaw;
+}
+
+function usageQueueEnabled(env: AppEnv["Bindings"]): boolean {
+	if (env.PROXY_USAGE_QUEUE_ENABLED === "false") {
+		return false;
+	}
+	return Boolean(env.USAGE_QUEUE);
+}
+
+function scheduleUsageEvent(
+	c: { env: AppEnv["Bindings"]; executionCtx?: ExecutionContextLike },
+	event: UsageQueueEvent,
+): void {
+	const queue = c.env.USAGE_QUEUE;
+	if (queue && usageQueueEnabled(c.env)) {
+		const task = queue.send(event).catch((error) => {
+			console.warn("[usage-queue:send_failed]", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return processUsageQueueEvent(c.env.DB, event);
+		});
+		scheduleDbWrite(c, task);
+		return;
+	}
+	scheduleDbWrite(c, processUsageQueueEvent(c.env.DB, event));
 }
 
 async function extractErrorDetails(
@@ -424,9 +497,9 @@ proxy.all("/*", tokenAuth, async (c) => {
 	}) => {
 		const latencyMs = Date.now() - requestStart;
 		const errorMessage = options.message ?? options.code;
-		scheduleDbWrite(
-			c,
-			recordUsage(c.env.DB, {
+		scheduleUsageEvent(c, {
+			type: "usage",
+			payload: {
 				tokenId: tokenRecord.id,
 				channelId: null,
 				model: downstreamModel,
@@ -440,8 +513,8 @@ proxy.all("/*", tokenAuth, async (c) => {
 				upstreamStatus: options.status,
 				errorCode: options.code,
 				errorMessage,
-			}),
-		);
+			},
+		});
 	};
 
 	const channelResult = await c.env.DB.prepare(
@@ -809,15 +882,14 @@ proxy.all("/*", tokenAuth, async (c) => {
 				selectedUpstreamModel = upstreamModel;
 				lastErrorDetails = null;
 				if (recordModel) {
-					scheduleDbWrite(
-						c,
-						upsertChannelModelCapabilities(
-							c.env.DB,
-							channel.id,
-							[recordModel],
+					scheduleUsageEvent(c, {
+						type: "capability_upsert",
+						payload: {
+							channelId: channel.id,
+							models: [recordModel],
 							nowSeconds,
-						),
-					);
+						},
+					});
 				}
 				break;
 			}
@@ -832,16 +904,15 @@ proxy.all("/*", tokenAuth, async (c) => {
 				errorInfo.errorCode,
 			);
 			if (recordModel && cooldownSeconds > 0 && cooldownEligible) {
-				scheduleDbWrite(
-					c,
-					recordChannelModelError(
-						c.env.DB,
-						channel.id,
-						recordModel,
-						String(response.status),
+				scheduleUsageEvent(c, {
+					type: "model_error",
+					payload: {
+						channelId: channel.id,
+						model: recordModel,
+						errorCode: String(response.status),
 						nowSeconds,
-					),
-				);
+					},
+				});
 			}
 			if (
 				downstreamModel &&
@@ -849,16 +920,15 @@ proxy.all("/*", tokenAuth, async (c) => {
 				cooldownSeconds > 0 &&
 				cooldownEligible
 			) {
-				scheduleDbWrite(
-					c,
-					recordChannelModelError(
-						c.env.DB,
-						channel.id,
-						downstreamModel,
-						String(response.status),
+				scheduleUsageEvent(c, {
+					type: "model_error",
+					payload: {
+						channelId: channel.id,
+						model: downstreamModel,
+						errorCode: String(response.status),
 						nowSeconds,
-					),
-				);
+					},
+				});
 			}
 		} catch (error) {
 			const isTimeout =
@@ -886,16 +956,15 @@ proxy.all("/*", tokenAuth, async (c) => {
 				isTimeout ? "timeout" : "exception",
 			);
 			if (recordModel && cooldownSeconds > 0 && cooldownEligible) {
-				scheduleDbWrite(
-					c,
-					recordChannelModelError(
-						c.env.DB,
-						channel.id,
-						recordModel,
-						isTimeout ? "timeout" : "exception",
+				scheduleUsageEvent(c, {
+					type: "model_error",
+					payload: {
+						channelId: channel.id,
+						model: recordModel,
+						errorCode: isTimeout ? "timeout" : "exception",
 						nowSeconds,
-					),
-				);
+					},
+				});
 			}
 			if (
 				downstreamModel &&
@@ -903,16 +972,15 @@ proxy.all("/*", tokenAuth, async (c) => {
 				cooldownSeconds > 0 &&
 				cooldownEligible
 			) {
-				scheduleDbWrite(
-					c,
-					recordChannelModelError(
-						c.env.DB,
-						channel.id,
-						downstreamModel,
-						isTimeout ? "timeout" : "exception",
+				scheduleUsageEvent(c, {
+					type: "model_error",
+					payload: {
+						channelId: channel.id,
+						model: downstreamModel,
+						errorCode: isTimeout ? "timeout" : "exception",
 						nowSeconds,
-					),
-				);
+					},
+				});
 			}
 			lastResponse = null;
 		}
@@ -936,19 +1004,22 @@ proxy.all("/*", tokenAuth, async (c) => {
 			latency_ms: latencyMs,
 			last_channel_id: lastChannel?.id ?? null,
 		});
-		await recordUsage(c.env.DB, {
-			tokenId: tokenRecord.id,
-			model: downstreamModel,
-			requestPath: lastRequestPath,
-			totalTokens: 0,
-			latencyMs,
-			firstTokenLatencyMs: isStream ? null : latencyMs,
-			stream: isStream,
-			reasoningEffort,
-			status: "error",
-			upstreamStatus: lastErrorDetails?.upstreamStatus ?? null,
-			errorCode: lastErrorDetails?.errorCode ?? "upstream_unavailable",
-			errorMessage: lastErrorDetails?.errorMessage ?? "upstream_unavailable",
+		scheduleUsageEvent(c, {
+			type: "usage",
+			payload: {
+				tokenId: tokenRecord.id,
+				model: downstreamModel,
+				requestPath: lastRequestPath,
+				totalTokens: 0,
+				latencyMs,
+				firstTokenLatencyMs: isStream ? null : latencyMs,
+				stream: isStream,
+				reasoningEffort,
+				status: "error",
+				upstreamStatus: lastErrorDetails?.upstreamStatus ?? null,
+				errorCode: lastErrorDetails?.errorCode ?? "upstream_unavailable",
+				errorMessage: lastErrorDetails?.errorMessage ?? "upstream_unavailable",
+			},
 		});
 		return jsonError(c, 502, "upstream_unavailable", "upstream_unavailable");
 	}
@@ -966,6 +1037,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 		const record = async (
 			usage: NormalizedUsage | null,
 			firstTokenLatencyMs?: number | null,
+			usageMissingReason?: string | null,
 		) => {
 			const normalized = usage ?? {
 				totalTokens: 0,
@@ -974,27 +1046,39 @@ proxy.all("/*", tokenAuth, async (c) => {
 			};
 			const resolvedFirstTokenLatencyMs =
 				firstTokenLatencyMs ?? (isStream ? null : latencyMs);
-			await recordUsage(c.env.DB, {
-				tokenId: tokenRecord.id,
-				channelId: channelForUsage.id,
-				model: downstreamModel,
-				requestPath: lastRequestPath,
-				totalTokens: normalized.totalTokens,
-				promptTokens: normalized.promptTokens,
-				completionTokens: normalized.completionTokens,
-				cost: 0,
-				latencyMs,
-				firstTokenLatencyMs: resolvedFirstTokenLatencyMs,
-				stream: isStream,
-				reasoningEffort,
-				status: lastResponse.ok ? "ok" : "error",
-				upstreamStatus: lastResponse.ok
-					? lastResponse.status
-					: errorDetails?.upstreamStatus ?? lastResponse.status,
-				errorCode: lastResponse.ok ? null : errorDetails?.errorCode ?? null,
-				errorMessage: lastResponse.ok
-					? null
-					: errorDetails?.errorMessage ?? null,
+			const usageMissing = !usage;
+			const errorCode = lastResponse.ok
+				? usageMissing
+					? usageMissingReason ?? "usage_missing"
+					: null
+				: errorDetails?.errorCode ?? null;
+			const errorMessage = lastResponse.ok
+				? usageMissing
+					? usageMissingReason ?? "usage_missing"
+					: null
+				: errorDetails?.errorMessage ?? null;
+			scheduleUsageEvent(c, {
+				type: "usage",
+				payload: {
+					tokenId: tokenRecord.id,
+					channelId: channelForUsage.id,
+					model: downstreamModel,
+					requestPath: lastRequestPath,
+					totalTokens: normalized.totalTokens,
+					promptTokens: normalized.promptTokens,
+					completionTokens: normalized.completionTokens,
+					cost: 0,
+					latencyMs,
+					firstTokenLatencyMs: resolvedFirstTokenLatencyMs,
+					stream: isStream,
+					reasoningEffort,
+					status: lastResponse.ok ? "ok" : "error",
+					upstreamStatus: lastResponse.ok
+						? lastResponse.status
+						: errorDetails?.upstreamStatus ?? lastResponse.status,
+					errorCode,
+					errorMessage,
+				},
 			});
 		};
 		const headerUsage = parseUsageFromHeaders(lastResponse.headers);
@@ -1012,22 +1096,37 @@ proxy.all("/*", tokenAuth, async (c) => {
 		}
 		const immediateUsage = jsonUsage ?? headerUsage;
 
-		if (isStream) {
+		if (isStream && lastResponse.ok) {
 			const executionCtx = (c as { executionCtx?: ExecutionContextLike })
 				.executionCtx;
-			const task = parseUsageFromSse(lastResponse.clone())
-				.then((streamUsage) => {
-					const usageValue = immediateUsage ?? streamUsage.usage;
-					return record(usageValue, streamUsage.firstTokenLatencyMs);
-				})
-				.catch(() => undefined);
-			if (executionCtx?.waitUntil) {
-				executionCtx.waitUntil(task);
+			const streamUsageOptions = getStreamUsageOptions(c.env);
+			const streamUsageMaxParsers = getStreamUsageMaxParsers(c.env);
+			const canParseStream =
+				streamUsageOptions.mode !== "off" &&
+				activeStreamUsageParsers < streamUsageMaxParsers;
+			if (!canParseStream) {
+				await record(immediateUsage, null, "usage_skipped");
 			} else {
-				task.catch(() => undefined);
+				activeStreamUsageParsers += 1;
+				const task = parseUsageFromSse(lastResponse.clone(), streamUsageOptions)
+					.then((streamUsage) => {
+						const usageValue = immediateUsage ?? streamUsage.usage;
+						const reason =
+							usageValue ? null : "usage_missing";
+						return record(usageValue, streamUsage.firstTokenLatencyMs, reason);
+					})
+					.catch(() => undefined)
+					.finally(() => {
+						activeStreamUsageParsers = Math.max(0, activeStreamUsageParsers - 1);
+					});
+				if (executionCtx?.waitUntil) {
+					executionCtx.waitUntil(task);
+				} else {
+					task.catch(() => undefined);
+				}
 			}
 		} else {
-			await record(immediateUsage, latencyMs);
+			await record(immediateUsage, latencyMs, immediateUsage ? null : "usage_missing");
 		}
 	}
 

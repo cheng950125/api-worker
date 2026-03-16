@@ -1,15 +1,28 @@
 import type { D1Database } from "@cloudflare/workers-types";
+import type { Bindings } from "../env";
 import { nowIso } from "../utils/time";
 
 const DEFAULT_LOG_RETENTION_DAYS = 30;
 const DEFAULT_SESSION_TTL_HOURS = 12;
 const DEFAULT_CHECKIN_SCHEDULE_TIME = "00:10";
 const DEFAULT_MODEL_FAILURE_COOLDOWN_MINUTES = 10;
+const DEFAULT_PROXY_STREAM_USAGE_MODE = "lite";
+const DEFAULT_PROXY_STREAM_USAGE_MAX_BYTES = 256 * 1024;
+const DEFAULT_PROXY_STREAM_USAGE_MAX_PARSERS = 2;
 const RETENTION_KEY = "log_retention_days";
 const SESSION_TTL_KEY = "session_ttl_hours";
 const ADMIN_PASSWORD_HASH_KEY = "admin_password_hash";
 const CHECKIN_SCHEDULE_TIME_KEY = "checkin_schedule_time";
 const MODEL_FAILURE_COOLDOWN_KEY = "model_failure_cooldown_minutes";
+
+export type RuntimeProxyConfig = {
+	stream_usage_mode: string;
+	stream_usage_max_bytes: number;
+	stream_usage_max_parsers: number;
+	usage_queue_enabled: boolean;
+	usage_queue_bound: boolean;
+	usage_queue_active: boolean;
+};
 
 async function readSetting(
 	db: D1Database,
@@ -44,6 +57,61 @@ function parsePositiveNumber(value: string | null, fallback: number): number {
 		return parsed;
 	}
 	return fallback;
+}
+
+function parsePositiveInt(value: string | undefined, fallback: number): number {
+	if (!value) {
+		return fallback;
+	}
+	const parsed = Number(value);
+	if (!Number.isNaN(parsed) && parsed > 0) {
+		return Math.floor(parsed);
+	}
+	return fallback;
+}
+
+function parseNonNegativeInt(value: string | undefined, fallback: number): number {
+	if (value === undefined || value === null || value === "") {
+		return fallback;
+	}
+	const parsed = Number(value);
+	if (!Number.isNaN(parsed) && parsed >= 0) {
+		return Math.floor(parsed);
+	}
+	return fallback;
+}
+
+function normalizeStreamUsageMode(value: string | undefined): string {
+	const normalized = (value ?? "").toLowerCase();
+	if (normalized === "off" || normalized === "full" || normalized === "lite") {
+		return normalized;
+	}
+	return DEFAULT_PROXY_STREAM_USAGE_MODE;
+}
+
+/**
+ * Returns runtime proxy configuration derived from environment variables.
+ *
+ * @param env - Worker bindings.
+ * @returns Runtime proxy configuration for display.
+ */
+export function getRuntimeProxyConfig(env: Bindings): RuntimeProxyConfig {
+	const usageQueueEnabled = env.PROXY_USAGE_QUEUE_ENABLED !== "false";
+	const usageQueueBound = Boolean(env.USAGE_QUEUE);
+	return {
+		stream_usage_mode: normalizeStreamUsageMode(env.PROXY_STREAM_USAGE_MODE),
+		stream_usage_max_bytes: parseNonNegativeInt(
+			env.PROXY_STREAM_USAGE_MAX_BYTES,
+			DEFAULT_PROXY_STREAM_USAGE_MAX_BYTES,
+		),
+		stream_usage_max_parsers: parseNonNegativeInt(
+			env.PROXY_STREAM_USAGE_MAX_PARSERS,
+			DEFAULT_PROXY_STREAM_USAGE_MAX_PARSERS,
+		),
+		usage_queue_enabled: usageQueueEnabled,
+		usage_queue_bound: usageQueueBound,
+		usage_queue_active: usageQueueEnabled && usageQueueBound,
+	};
 }
 
 /**

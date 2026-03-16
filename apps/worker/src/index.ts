@@ -14,6 +14,7 @@ import settingsRoutes from "./routes/settings";
 import siteRoutes from "./routes/sites";
 import tokenRoutes from "./routes/tokens";
 import usageRoutes from "./routes/usage";
+import { handleUsageQueue } from "./services/usage-queue";
 
 const app = new Hono<AppEnv>({ strict: false });
 app.use(
@@ -137,6 +138,9 @@ app.notFound(async (c) => {
 	return assets.fetch(new Request(url.toString(), c.req.raw));
 });
 
-export default app;
+export default {
+	fetch: app.fetch,
+	queue: handleUsageQueue,
+};
 
 export { CheckinScheduler } from "./services/checkin-scheduler";
