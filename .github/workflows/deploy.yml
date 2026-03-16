@@ -309,7 +309,7 @@ jobs:
             if [ $CREATE_STATUS -eq 0 ]; then
               echo "✅ Queue 已创建: usage-events"
             else
-              if echo "$CREATE_OUTPUT" | grep -qi "already exists"; then
+              if echo "$CREATE_OUTPUT" | grep -Eqi "already exists|already taken|code: 11009"; then
                 echo "✅ Queue 已存在: usage-events"
               else
                 echo "❌ 队列创建失败，输出如下："
@@ -467,7 +467,7 @@ jobs:
             if [ $CREATE_STATUS -eq 0 ]; then
               echo "✅ Queue 已创建: usage-events"
             else
-              if echo "$CREATE_OUTPUT" | grep -qi "already exists"; then
+              if echo "$CREATE_OUTPUT" | grep -Eqi "already exists|already taken|code: 11009"; then
                 echo "✅ Queue 已存在: usage-events"
               else
                 echo "❌ 队列创建失败，输出如下："
