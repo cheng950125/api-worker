@@ -293,7 +293,7 @@ jobs:
           }
           const exists = list.some((item) => item && item.name === target);
           console.log(exists ? "true" : "false");
-NODE
+          NODE
           )
 
           if [ "$QUEUE_EXISTS" = "true" ]; then
@@ -446,7 +446,7 @@ NODE
           }
           const exists = list.some((item) => item && item.name === target);
           console.log(exists ? "true" : "false");
-NODE
+          NODE
           )
 
           if [ "$QUEUE_EXISTS" = "true" ]; then

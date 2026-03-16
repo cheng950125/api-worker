@@ -199,6 +199,9 @@
 
 ### 快速修改
 
+- **[ci]**: 修复队列检查脚本的 heredoc 缩进导致的 YAML 解析失败 — by lsy
+  - 类型: 快速修改（无方案包）
+  - 文件: .github/workflows/deploy.yml:263-316,416-469
 - **[tooling]**: dev 脚本适配 bun 可执行路径解析 — by lsy
   - 类型: 快速修改（无方案包）
   - 文件: scripts/dev.mjs
