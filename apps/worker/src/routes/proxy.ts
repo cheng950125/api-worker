@@ -201,6 +201,31 @@ function extractResponsesRequestHints(
 	};
 }
 
+function hasChatToolOutputHint(
+	body: Record<string, unknown> | null,
+): boolean {
+	if (!body || !Array.isArray(body.messages)) {
+		return false;
+	}
+	for (const message of body.messages) {
+		if (!message || typeof message !== "object" || Array.isArray(message)) {
+			continue;
+		}
+		const record = message as Record<string, unknown>;
+		const role = normalizeStringField(record.role)?.toLowerCase();
+		if (role !== "tool") {
+			continue;
+		}
+		const toolCallId = normalizeStringField(
+			record.tool_call_id ?? record.toolCallId ?? record.call_id,
+		);
+		if (toolCallId) {
+			return true;
+		}
+	}
+	return false;
+}
+
 function isResponsesToolCallNotFoundMessage(message: string | null): boolean {
 	const normalized = normalizeMessage(message)?.toLowerCase();
 	if (!normalized) {
@@ -1266,6 +1291,9 @@ proxy.all("/*", tokenAuth, async (c) => {
 		downstreamProvider === "openai"
 			? extractResponsesRequestHints(parsedBody)
 			: null;
+	const hasChatToolOutput = downstreamProvider === "openai"
+		? hasChatToolOutputHint(parsedBody)
+		: false;
 	const reasoningEffort = extractReasoningEffort(parsedBody);
 	const scheduleRuntimeEvent = (
 		level: "info" | "warning" | "error",
@@ -2180,6 +2208,8 @@ proxy.all("/*", tokenAuth, async (c) => {
 				normalizeMessage(errorInfo.errorMessage) ?? normalizedErrorCode;
 				const responsesToolCallMismatch =
 					downstreamProvider === "openai" &&
+					(responsesRequestHints?.hasFunctionCallOutput === true ||
+						hasChatToolOutput) &&
 					isResponsesToolCallNotFoundMessage(normalizedErrorMessage);
 				const streamOptionsUnsupported =
 					shouldHandleStreamOptions &&
@@ -2350,7 +2380,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 	if (!selectedResponse) {
 		if (responsesToolCallMismatchChannels.length > 0) {
 			const code = "responses_tool_call_chain_mismatch";
-			const details = `responses_tool_call_chain_mismatch: previous_response_id=${responsesRequestHints?.previousResponseId ?? "-"}, channels=${responsesToolCallMismatchChannels.join(",")}`;
+			const details = `responses_tool_call_chain_mismatch: previous_response_id=${responsesRequestHints?.previousResponseId ?? "-"}, channels=${responsesToolCallMismatchChannels.join(",")}, hint_source=${responsesRequestHints?.hasFunctionCallOutput ? "responses_input" : hasChatToolOutput ? "chat_messages" : "unknown"}`;
 			recordEarlyUsage({
 				status: 409,
 				code,
