@@ -99,6 +99,8 @@ export type RuntimeProxyConfig = {
 	attempt_worker_fallback_threshold: number;
 	attempt_log_enabled: boolean;
 	attempt_log_retention_days: number;
+	attempt_worker_bound: boolean;
+	attempt_worker_fallback_active: boolean;
 	usage_queue_bound: boolean;
 	usage_queue_active: boolean;
 };
@@ -498,8 +500,12 @@ export function getRuntimeProxyConfig(
 ): RuntimeProxyConfig {
 	const usageQueueBound = Boolean(env.USAGE_QUEUE);
 	const usageQueueEnabled = settings.usage_queue_enabled;
+	const attemptWorkerBound = Boolean(env.ATTEMPT_WORKER);
 	return {
 		...settings,
+		attempt_worker_bound: attemptWorkerBound,
+		attempt_worker_fallback_active:
+			attemptWorkerBound && settings.attempt_worker_fallback_enabled,
 		usage_queue_bound: usageQueueBound,
 		usage_queue_active: usageQueueEnabled && usageQueueBound,
 	};

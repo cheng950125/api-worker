@@ -151,6 +151,8 @@ export type RuntimeProxySettings = {
 };
 
 export type RuntimeProxyConfig = RuntimeProxySettings & {
+	attempt_worker_bound: boolean;
+	attempt_worker_fallback_active: boolean;
 	usage_queue_bound: boolean;
 	usage_queue_active: boolean;
 };

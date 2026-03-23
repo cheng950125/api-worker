@@ -89,6 +89,18 @@ export const SettingsView = ({
 				usageQueueStatus.target_direct_ratio,
 			)}`
 		: "-";
+	const attemptWorkerBoundValue =
+		runtimeConfig === null || runtimeConfig === undefined
+			? "-"
+			: runtimeConfig.attempt_worker_bound
+				? "已绑定"
+				: "未绑定";
+	const attemptWorkerActiveValue =
+		runtimeConfig === null || runtimeConfig === undefined
+			? "-"
+			: runtimeConfig.attempt_worker_fallback_active
+				? "是"
+				: "否";
 
 	return (
 		<div class="animate-fade-up space-y-4">
@@ -256,54 +268,6 @@ export const SettingsView = ({
 						</div>
 						<div class="app-settings-row">
 							<div class="app-settings-row__main">
-								<span class="app-settings-row__label">启用 Attempt 回退</span>
-								<p class="app-settings-row__hint">
-									启用后，attempt-worker 调用异常达到阈值会切换本请求后续 attempt 为本地直连。
-								</p>
-							</div>
-							<div class="app-settings-row__switch">
-								<Switch
-									checked={settingsForm.proxy_attempt_worker_fallback_enabled}
-									onToggle={(next) => {
-										onFormChange({
-											proxy_attempt_worker_fallback_enabled: next,
-										});
-									}}
-								/>
-							</div>
-						</div>
-						<div class="app-settings-row">
-							<div class="app-settings-row__main">
-								<label
-									class="app-settings-row__label"
-									for="proxy-attempt-worker-fallback-threshold"
-								>
-									Attempt 回退阈值
-								</label>
-								<p class="app-settings-row__hint">
-									单个请求内累计到该异常次数后，后续 attempt 全部本地直连，最小 1。
-								</p>
-							</div>
-							<Input
-								class="app-settings-row__control app-settings-row__control--compact"
-								id="proxy-attempt-worker-fallback-threshold"
-								name="proxy_attempt_worker_fallback_threshold"
-								type="number"
-								min="1"
-								step="1"
-								disabled={!settingsForm.proxy_attempt_worker_fallback_enabled}
-								value={settingsForm.proxy_attempt_worker_fallback_threshold}
-								onInput={(event) => {
-									const target = event.currentTarget as HTMLInputElement | null;
-									onFormChange({
-										proxy_attempt_worker_fallback_threshold:
-											target?.value ?? "",
-									});
-								}}
-							/>
-						</div>
-						<div class="app-settings-row">
-							<div class="app-settings-row__main">
 								<label
 									class="app-settings-row__label"
 									for="proxy-model-failure-cooldown"
@@ -415,6 +379,73 @@ export const SettingsView = ({
 									});
 								}}
 							/>
+						</div>
+					</div>
+				</Card>
+
+				<Card class="app-settings-group">
+					<div class="app-settings-group__header">
+						<h4 class="app-settings-group__title">调用执行器</h4>
+						<p class="app-settings-group__caption">单次调用执行与异常回退</p>
+					</div>
+					<div class="app-settings-list">
+						<div class="app-settings-row">
+							<div class="app-settings-row__main">
+								<span class="app-settings-row__label">启用调用执行器异常回退</span>
+								<p class="app-settings-row__hint">
+									当调用执行器出现异常时，按阈值切换为本地直连，提升请求稳定性。
+								</p>
+							</div>
+							<div class="app-settings-row__switch">
+								<Switch
+									checked={settingsForm.proxy_attempt_worker_fallback_enabled}
+									onToggle={(next) => {
+										onFormChange({
+											proxy_attempt_worker_fallback_enabled: next,
+										});
+									}}
+								/>
+							</div>
+						</div>
+						<div class="app-settings-row">
+							<div class="app-settings-row__main">
+								<label
+									class="app-settings-row__label"
+									for="proxy-attempt-worker-fallback-threshold"
+								>
+									异常阈值（次/请求）
+								</label>
+								<p class="app-settings-row__hint">
+									单个请求内达到该异常次数后，后续执行会自动切为本地直连，最小 1。
+								</p>
+							</div>
+							<Input
+								class="app-settings-row__control app-settings-row__control--compact"
+								id="proxy-attempt-worker-fallback-threshold"
+								name="proxy_attempt_worker_fallback_threshold"
+								type="number"
+								min="1"
+								step="1"
+								disabled={!settingsForm.proxy_attempt_worker_fallback_enabled}
+								value={settingsForm.proxy_attempt_worker_fallback_threshold}
+								onInput={(event) => {
+									const target = event.currentTarget as HTMLInputElement | null;
+									onFormChange({
+										proxy_attempt_worker_fallback_threshold:
+											target?.value ?? "",
+									});
+								}}
+							/>
+						</div>
+					</div>
+					<div class="app-settings-stats">
+						<div class="app-settings-stat">
+							<div class="app-settings-stat__label">调用执行器绑定</div>
+							<div class="app-settings-stat__value">{attemptWorkerBoundValue}</div>
+						</div>
+						<div class="app-settings-stat">
+							<div class="app-settings-stat__label">回退策略生效</div>
+							<div class="app-settings-stat__value">{attemptWorkerActiveValue}</div>
 						</div>
 					</div>
 				</Card>

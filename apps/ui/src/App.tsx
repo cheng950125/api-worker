@@ -1418,7 +1418,7 @@ const App = () => {
 				attemptWorkerFallbackThreshold < 1 ||
 				!Number.isInteger(attemptWorkerFallbackThreshold)
 			) {
-				pushNotice("warning", "Attempt 回退阈值需为正整数");
+				pushNotice("warning", "调用执行器异常阈值需为正整数");
 				return;
 			}
 			startAction(actionKey);
