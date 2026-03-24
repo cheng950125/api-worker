@@ -6,6 +6,8 @@ import {
 	getProxyRuntimeSettings,
 	getRetentionDays,
 	getRuntimeProxyConfig,
+	LARGE_REQUEST_OFFLOAD_ENDPOINT_OPTIONS,
+	type LargeRequestOffloadEndpoint,
 	getSessionTtlHours,
 	isAdminPasswordSet,
 	setAdminPasswordHash,
@@ -156,6 +158,8 @@ settings.put("/", async (c) => {
 		usage_queue_direct_write_ratio?: number;
 		attempt_worker_fallback_enabled?: boolean;
 		attempt_worker_fallback_threshold?: number;
+		large_request_offload_endpoints?: LargeRequestOffloadEndpoint[];
+		large_request_offload_threshold_bytes?: number;
 		attempt_log_enabled?: boolean;
 		attempt_log_retention_days?: number;
 	} = {};
@@ -433,6 +437,66 @@ settings.put("/", async (c) => {
 			);
 		}
 		runtimePatch.attempt_worker_fallback_threshold = threshold;
+		runtimeTouched = true;
+	}
+
+	if (body.proxy_large_request_offload_endpoints !== undefined) {
+		const raw = body.proxy_large_request_offload_endpoints;
+		let endpointList: string[] | null = null;
+		if (Array.isArray(raw)) {
+			endpointList = raw.map((item) => String(item));
+		} else if (typeof raw === "string") {
+			endpointList = raw.split(",");
+		}
+		if (!endpointList) {
+			return jsonError(
+				c,
+				400,
+				"invalid_proxy_large_request_offload_endpoints",
+				"invalid_proxy_large_request_offload_endpoints",
+			);
+		}
+		const allowed = new Set<string>(LARGE_REQUEST_OFFLOAD_ENDPOINT_OPTIONS);
+		const seen = new Set<string>();
+		const normalized: LargeRequestOffloadEndpoint[] = [];
+		for (const endpoint of endpointList) {
+			const value = endpoint.trim().toLowerCase();
+			if (!value) {
+				continue;
+			}
+			if (!allowed.has(value)) {
+				return jsonError(
+					c,
+					400,
+					"invalid_proxy_large_request_offload_endpoints",
+					"invalid_proxy_large_request_offload_endpoints",
+				);
+			}
+			if (seen.has(value)) {
+				continue;
+			}
+			seen.add(value);
+			normalized.push(value as LargeRequestOffloadEndpoint);
+		}
+		runtimePatch.large_request_offload_endpoints = normalized;
+		runtimeTouched = true;
+	}
+
+	if (body.proxy_large_request_offload_threshold_bytes !== undefined) {
+		const thresholdBytes = Number(body.proxy_large_request_offload_threshold_bytes);
+		if (
+			Number.isNaN(thresholdBytes) ||
+			thresholdBytes < 0 ||
+			!Number.isInteger(thresholdBytes)
+		) {
+			return jsonError(
+				c,
+				400,
+				"invalid_proxy_large_request_offload_threshold_bytes",
+				"invalid_proxy_large_request_offload_threshold_bytes",
+			);
+		}
+		runtimePatch.large_request_offload_threshold_bytes = thresholdBytes;
 		runtimeTouched = true;
 	}
 

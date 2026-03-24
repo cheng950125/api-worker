@@ -148,6 +148,8 @@ export type RuntimeProxySettings = {
 	usage_queue_direct_write_ratio: number;
 	attempt_worker_fallback_enabled: boolean;
 	attempt_worker_fallback_threshold: number;
+	large_request_offload_endpoints: string[];
+	large_request_offload_threshold_bytes: number;
 };
 
 export type RuntimeProxyConfig = RuntimeProxySettings & {
@@ -249,6 +251,8 @@ export type SettingsForm = {
 	usage_queue_direct_write_ratio: string;
 	proxy_attempt_worker_fallback_enabled: boolean;
 	proxy_attempt_worker_fallback_threshold: string;
+	proxy_large_request_offload_endpoints: string[];
+	proxy_large_request_offload_threshold_bytes: string;
 };
 
 export type TokenForm = {

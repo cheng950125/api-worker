@@ -432,7 +432,7 @@ body {
 }
 
 .app-multi-select-root--open {
-	z-index: 240;
+	z-index: 1080;
 }
 
 .app-multi-select {
@@ -883,7 +883,7 @@ body {
 	position: absolute;
 	top: calc(100% + 10px);
 	right: 0;
-	z-index: 240;
+	z-index: 1060;
 	min-width: 220px;
 	border-radius: var(--app-radius-sm);
 	border: 1px solid rgba(204, 210, 221, 0.92);
@@ -1109,6 +1109,10 @@ body {
 	overflow: hidden;
 }
 
+.app-settings-group--allow-overflow {
+	overflow: visible;
+}
+
 .app-settings-group__header {
 	display: flex;
 	align-items: baseline;
@@ -1144,6 +1148,10 @@ body {
 	overflow: hidden;
 }
 
+.app-settings-list--allow-overflow {
+	overflow: visible;
+}
+
 .app-settings-row {
 	display: flex;
 	align-items: center;
@@ -1158,6 +1166,11 @@ body {
 
 .app-settings-row--stack {
 	display: block;
+}
+
+.app-settings-row--overlay {
+	position: relative;
+	z-index: 20;
 }
 
 .app-settings-row__main {

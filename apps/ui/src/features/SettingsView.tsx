@@ -1,4 +1,4 @@
-import { Button, Card, Input, Switch } from "../components/ui";
+﻿import { Button, Card, Input, MultiSelect, Switch } from "../components/ui";
 import type {
 	RuntimeProxyConfig,
 	SettingsForm,
@@ -19,6 +19,14 @@ const streamUsageModes = [
 	{ value: "full", label: "完整", hint: "全量解析" },
 	{ value: "lite", label: "轻量", hint: "降低开销" },
 	{ value: "off", label: "关闭", hint: "仅记录基础" },
+] as const;
+
+const largeRequestOffloadEndpointOptions = [
+	{ value: "chat", label: "chat/completions" },
+	{ value: "responses", label: "responses" },
+	{ value: "embeddings", label: "embeddings" },
+	{ value: "images", label: "images" },
+	{ value: "passthrough", label: "passthrough" },
 ] as const;
 
 /**
@@ -210,12 +218,12 @@ export const SettingsView = ({
 					</div>
 				</Card>
 
-				<Card class="app-settings-group">
+				<Card class="app-settings-group app-settings-group--allow-overflow">
 					<div class="app-settings-group__header">
 						<h4 class="app-settings-group__title">代理请求</h4>
 						<p class="app-settings-group__caption">上游调用与重试策略</p>
 					</div>
-					<div class="app-settings-list">
+					<div class="app-settings-list app-settings-list--allow-overflow">
 						<div class="app-settings-row">
 							<div class="app-settings-row__main">
 								<label
@@ -383,12 +391,12 @@ export const SettingsView = ({
 					</div>
 				</Card>
 
-				<Card class="app-settings-group">
+				<Card class="app-settings-group app-settings-group--allow-overflow">
 					<div class="app-settings-group__header">
 						<h4 class="app-settings-group__title">调用执行器</h4>
 						<p class="app-settings-group__caption">单次调用执行与异常回退</p>
 					</div>
-					<div class="app-settings-list">
+					<div class="app-settings-list app-settings-list--allow-overflow">
 						<div class="app-settings-row">
 							<div class="app-settings-row__main">
 								<span class="app-settings-row__label">启用调用执行器异常回退</span>
@@ -432,6 +440,56 @@ export const SettingsView = ({
 									const target = event.currentTarget as HTMLInputElement | null;
 									onFormChange({
 										proxy_attempt_worker_fallback_threshold:
+											target?.value ?? "",
+									});
+								}}
+							/>
+						</div>
+						<div class="app-settings-row app-settings-row--stack app-settings-row--overlay">
+							<div class="app-settings-row__main">
+								<span class="app-settings-row__label">大请求下沉端点</span>
+								<p class="app-settings-row__hint">
+									仅对选中的接口应用大请求下沉策略，可搜索并多选。
+								</p>
+							</div>
+							<MultiSelect
+								class="app-settings-row__control app-settings-row__control--full"
+								emptyLabel="没有可选端点"
+								options={[...largeRequestOffloadEndpointOptions]}
+								placeholder="未选择端点"
+								searchPlaceholder="搜索端点"
+								value={settingsForm.proxy_large_request_offload_endpoints}
+								onChange={(next) =>
+									onFormChange({
+										proxy_large_request_offload_endpoints: next,
+									})
+								}
+							/>
+						</div>
+						<div class="app-settings-row">
+							<div class="app-settings-row__main">
+								<label
+									class="app-settings-row__label"
+									for="proxy-large-request-offload-threshold"
+								>
+									大请求下沉阈值（字节）
+								</label>
+								<p class="app-settings-row__hint">
+									达到该体积后才触发下沉；0 表示所有命中端点都下沉。
+								</p>
+							</div>
+							<Input
+								class="app-settings-row__control app-settings-row__control--compact"
+								id="proxy-large-request-offload-threshold"
+								name="proxy_large_request_offload_threshold_bytes"
+								type="number"
+								min="0"
+								step="1"
+								value={settingsForm.proxy_large_request_offload_threshold_bytes}
+								onInput={(event) => {
+									const target = event.currentTarget as HTMLInputElement | null;
+									onFormChange({
+										proxy_large_request_offload_threshold_bytes:
 											target?.value ?? "",
 									});
 								}}
@@ -703,3 +761,4 @@ export const SettingsView = ({
 		</div>
 	);
 };
+

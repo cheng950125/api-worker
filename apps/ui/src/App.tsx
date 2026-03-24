@@ -104,6 +104,17 @@ const DEFAULT_BASE_URL_BY_TYPE: Partial<Record<SiteType, string>> = {
 	gemini: "https://generativelanguage.googleapis.com",
 };
 
+const LARGE_REQUEST_OFFLOAD_ENDPOINT_OPTIONS = [
+	"chat",
+	"responses",
+	"embeddings",
+	"images",
+	"passthrough",
+] as const;
+const LARGE_REQUEST_OFFLOAD_ENDPOINT_SET = new Set<string>(
+	LARGE_REQUEST_OFFLOAD_ENDPOINT_OPTIONS,
+);
+
 type ConfirmState = {
 	title: string;
 	message: string;
@@ -697,6 +708,16 @@ const App = () => {
 				runtimeSettings?.attempt_worker_fallback_enabled ?? false,
 			proxy_attempt_worker_fallback_threshold: String(
 				runtimeSettings?.attempt_worker_fallback_threshold ?? 2,
+			),
+			proxy_large_request_offload_endpoints: Array.isArray(
+				runtimeSettings?.large_request_offload_endpoints,
+			)
+				? runtimeSettings?.large_request_offload_endpoints.filter((item) =>
+						LARGE_REQUEST_OFFLOAD_ENDPOINT_SET.has(String(item)),
+					)
+				: ["chat", "responses"],
+			proxy_large_request_offload_threshold_bytes: String(
+				runtimeSettings?.large_request_offload_threshold_bytes ?? 32768,
 			),
 		});
 	}, [data.settings]);
@@ -1331,6 +1352,11 @@ const App = () => {
 			const attemptWorkerFallbackThreshold = Number(
 				settingsForm.proxy_attempt_worker_fallback_threshold,
 			);
+			const largeRequestOffloadEndpoints =
+				settingsForm.proxy_large_request_offload_endpoints;
+			const largeRequestOffloadThresholdBytes = Number(
+				settingsForm.proxy_large_request_offload_threshold_bytes,
+			);
 			if (
 				Number.isNaN(retention) ||
 				retention < 1 ||
@@ -1421,6 +1447,23 @@ const App = () => {
 				pushNotice("warning", "调用执行器异常阈值需为正整数");
 				return;
 			}
+			if (
+				!Array.isArray(largeRequestOffloadEndpoints) ||
+				largeRequestOffloadEndpoints.some(
+					(endpoint) => !LARGE_REQUEST_OFFLOAD_ENDPOINT_SET.has(endpoint),
+				)
+			) {
+				pushNotice("warning", "大请求下沉端点配置无效");
+				return;
+			}
+			if (
+				Number.isNaN(largeRequestOffloadThresholdBytes) ||
+				largeRequestOffloadThresholdBytes < 0 ||
+				!Number.isInteger(largeRequestOffloadThresholdBytes)
+			) {
+				pushNotice("warning", "大请求下沉阈值需为非负整数");
+				return;
+			}
 			startAction(actionKey);
 			const payload: Record<
 				string,
@@ -1447,6 +1490,9 @@ const App = () => {
 				proxy_attempt_worker_fallback_enabled:
 					settingsForm.proxy_attempt_worker_fallback_enabled,
 				proxy_attempt_worker_fallback_threshold: attemptWorkerFallbackThreshold,
+				proxy_large_request_offload_endpoints: largeRequestOffloadEndpoints,
+				proxy_large_request_offload_threshold_bytes:
+					largeRequestOffloadThresholdBytes,
 			};
 			const password = settingsForm.admin_password.trim();
 			if (password) {

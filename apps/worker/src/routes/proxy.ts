@@ -141,6 +141,8 @@ const ATTEMPT_BINDING_RESPONSE_PATH_HEADER = "x-ha-attempt-response-path";
 const ATTEMPT_BINDING_LATENCY_HEADER = "x-ha-attempt-latency-ms";
 const ATTEMPT_BINDING_UPSTREAM_REQUEST_ID_HEADER =
 	"x-ha-attempt-upstream-request-id";
+const ATTEMPT_DISPATCH_INDEX_HEADER = "x-ha-dispatch-attempt-index";
+const ATTEMPT_DISPATCH_CHANNEL_ID_HEADER = "x-ha-dispatch-channel-id";
 const MAX_ATTEMPT_WORKER_INVOCATIONS = 31;
 
 let activeStreamUsageParsers = 0;
@@ -1733,11 +1735,38 @@ type AttemptBindingRequest = {
 	fallbackPath?: string;
 };
 
+type AttemptDispatchRequest = {
+	channelId: string;
+	method: string;
+	target: string;
+	fallbackTarget?: string;
+	headers: Array<[string, string]>;
+	bodyText?: string;
+	timeoutMs: number;
+	responsePath: string;
+	fallbackPath?: string;
+	streamOptionsInjected?: boolean;
+	strippedBodyText?: string;
+};
+
+type DispatchBindingRequest = {
+	attempts: AttemptDispatchRequest[];
+};
+
 type AttemptBindingResult = {
 	response: Response;
 	responsePath: string;
 	latencyMs: number;
 	upstreamRequestId: string | null;
+};
+
+type DispatchBindingResult = {
+	response: Response;
+	responsePath: string;
+	latencyMs: number;
+	upstreamRequestId: string | null;
+	attemptIndex: number;
+	channelId: string | null;
 };
 
 type AttemptBindingPolicy = {
@@ -1779,6 +1808,17 @@ function parseLatencyHeader(value: string | null): number {
 		return 0;
 	}
 	return Math.floor(parsed);
+}
+
+function parseAttemptIndexHeader(value: string | null): number | null {
+	if (!value) {
+		return null;
+	}
+	const parsed = Number(value);
+	if (!Number.isInteger(parsed) || parsed < 0) {
+		return null;
+	}
+	return parsed;
 }
 
 type HeaderLookup = {
@@ -1880,6 +1920,62 @@ async function executeAttemptViaWorker(
 			state.forceLocalDirect = true;
 		}
 		return executeLocalDirect();
+	}
+}
+
+async function executeDispatchViaWorker(
+	c: { env: AppEnv["Bindings"] },
+	input: DispatchBindingRequest,
+	policy: AttemptBindingPolicy,
+	state: AttemptBindingState,
+): Promise<DispatchBindingResult | null> {
+	const binding = c.env.ATTEMPT_WORKER;
+	if (!binding || state.forceLocalDirect || input.attempts.length === 0) {
+		return null;
+	}
+	try {
+		const response = await binding.fetch(
+			"https://attempt-worker/internal/attempt/dispatch",
+			{
+				method: "POST",
+				headers: {
+					"content-type": "application/json",
+				},
+				body: JSON.stringify(input),
+			},
+		);
+		const firstAttempt = input.attempts[0];
+		const fallbackIndex = Math.max(0, input.attempts.length - 1);
+		const attemptIndex =
+			parseAttemptIndexHeader(response.headers.get(ATTEMPT_DISPATCH_INDEX_HEADER)) ??
+			fallbackIndex;
+		const selectedAttempt = input.attempts[attemptIndex] ?? firstAttempt;
+		const responsePath =
+			response.headers.get(ATTEMPT_BINDING_RESPONSE_PATH_HEADER) ??
+			selectedAttempt.responsePath;
+		const latencyMs = parseLatencyHeader(
+			response.headers.get(ATTEMPT_BINDING_LATENCY_HEADER),
+		);
+		const channelId =
+			normalizeStringField(response.headers.get(ATTEMPT_DISPATCH_CHANNEL_ID_HEADER)) ??
+			selectedAttempt.channelId;
+		return {
+			response: response as unknown as Response,
+			responsePath,
+			latencyMs,
+			upstreamRequestId: normalizeUpstreamRequestIdFromHeaders(response.headers),
+			attemptIndex,
+			channelId,
+		};
+	} catch (error) {
+		if (!policy.fallbackEnabled) {
+			throw error;
+		}
+		state.bindingFailureCount += 1;
+		if (state.bindingFailureCount >= policy.fallbackThreshold) {
+			state.forceLocalDirect = true;
+		}
+		return null;
 	}
 }
 
@@ -2419,6 +2515,26 @@ proxy.all("/*", tokenAuth, async (c) => {
 		0,
 		Math.floor(Number(runtimeSettings.upstream_timeout_ms ?? 30000)),
 	);
+	const offloadThresholdBytes = Math.max(
+		0,
+		Math.floor(Number(runtimeSettings.large_request_offload_threshold_bytes ?? 32768)),
+	);
+	const requestContentLength = Number(c.req.header("content-length") ?? "");
+	const requestSizeBytes =
+		Number.isFinite(requestContentLength) && requestContentLength >= 0
+			? Math.floor(requestContentLength)
+			: effectiveRequestText
+				? effectiveRequestText.length
+				: 0;
+	const offloadEndpoints = Array.isArray(
+		runtimeSettings.large_request_offload_endpoints,
+	)
+		? runtimeSettings.large_request_offload_endpoints
+		: [];
+	const shouldTryLargeRequestDispatch =
+		Boolean(c.env.ATTEMPT_WORKER) &&
+		offloadEndpoints.includes(endpointType) &&
+		requestSizeBytes >= offloadThresholdBytes;
 	const nowSeconds = Math.floor(Date.now() / 1000);
 	let selectedResponse: Response | null = null;
 	let selectedChannel: ChannelRecord | null = null;
@@ -2482,7 +2598,457 @@ proxy.all("/*", tokenAuth, async (c) => {
 			),
 		);
 	};
-	for (const [attemptIndex, channel] of ordered.entries()) {
+	const dispatchAttempts: AttemptDispatchRequest[] = [];
+	const dispatchAttemptMeta: Array<{
+		channel: ChannelRecord;
+		upstreamProvider: ProviderType;
+		upstreamModel: string | null;
+		recordModel: string | null;
+		attemptStartedAt: string;
+		streamOptionsHandled: boolean;
+	}> = [];
+	let dispatchHandled = false;
+	if (shouldTryLargeRequestDispatch) {
+		for (const channel of ordered) {
+			const attemptStart = Date.now();
+			const attemptStartedAt = new Date(attemptStart).toISOString();
+			const metadata = parseChannelMetadata(channel.metadata_json);
+			const upstreamProvider = resolveProvider(metadata.site_type);
+			const resolvedModel = resolveUpstreamModelForChannel(
+				channel,
+				metadata,
+				downstreamModel,
+				verifiedModelsByChannel,
+			);
+			const upstreamModel = resolvedModel.model;
+			const recordModel = upstreamModel ?? downstreamModel;
+			if (
+				upstreamProvider === "gemini" &&
+				!upstreamModel &&
+				endpointType !== "passthrough"
+			) {
+				continue;
+			}
+			const baseUrl = resolveChannelBaseUrl(channel);
+			const tokens = callTokenMap.get(channel.id) ?? [];
+			const selection = selectTokenForModel(tokens, recordModel);
+			if (!selection.token && selection.hasModelList && recordModel) {
+				continue;
+			}
+			const apiKey = selection.token?.api_key ?? channel.api_key;
+			const headers = buildUpstreamHeaders(
+				new Headers(c.req.header()),
+				upstreamProvider,
+				String(apiKey),
+				metadata.header_overrides,
+			);
+			headers.delete("host");
+			headers.delete("content-length");
+			let upstreamRequestPath = targetPath;
+			let upstreamFallbackPath: string | undefined;
+			let upstreamBodyText = effectiveRequestText || undefined;
+			let absoluteUrl: string | undefined;
+			const sameProvider = upstreamProvider === downstreamProvider;
+			if (endpointType === "passthrough") {
+				if (!sameProvider) {
+					continue;
+				}
+				if (upstreamProvider === "gemini") {
+					upstreamRequestPath = applyGeminiModelToPath(
+						upstreamRequestPath,
+						upstreamModel,
+					);
+				} else if (upstreamModel && parsedBody) {
+					upstreamBodyText = JSON.stringify({
+						...parsedBody,
+						model: upstreamModel,
+					});
+				}
+			} else if (sameProvider && parsedBody) {
+				if (upstreamProvider === "gemini") {
+					upstreamRequestPath = applyGeminiModelToPath(
+						upstreamRequestPath,
+						upstreamModel,
+					);
+				} else if (upstreamModel) {
+					upstreamBodyText = JSON.stringify({
+						...parsedBody,
+						model: upstreamModel,
+					});
+				}
+			} else {
+				let built:
+					| {
+							request: UpstreamRequest;
+							bodyText?: string;
+					  }
+					| null = null;
+				if (endpointType === "chat" || endpointType === "responses") {
+					if (!normalizedChat) {
+						recordEarlyUsage({
+							status: 400,
+							code: "invalid_body",
+							message: "invalid_body",
+						});
+						return jsonErrorWithTrace(400, "invalid_body", "invalid_body");
+					}
+					const request = buildUpstreamChatRequest(
+						upstreamProvider,
+						normalizedChat,
+						upstreamModel,
+						endpointType,
+						isStream,
+						metadata.endpoint_overrides,
+					);
+					if (!request) {
+						continue;
+					}
+					built = {
+						request,
+						bodyText: request.body ? JSON.stringify(request.body) : undefined,
+					};
+				} else if (endpointType === "embeddings") {
+					if (!normalizedEmbedding) {
+						recordEarlyUsage({
+							status: 400,
+							code: "invalid_body",
+							message: "invalid_body",
+						});
+						return jsonErrorWithTrace(400, "invalid_body", "invalid_body");
+					}
+					const request = buildUpstreamEmbeddingRequest(
+						upstreamProvider,
+						normalizedEmbedding,
+						upstreamModel,
+						metadata.endpoint_overrides,
+					);
+					if (!request) {
+						continue;
+					}
+					built = {
+						request,
+						bodyText: request.body ? JSON.stringify(request.body) : undefined,
+					};
+				} else if (endpointType === "images") {
+					if (!normalizedImage) {
+						recordEarlyUsage({
+							status: 400,
+							code: "invalid_body",
+							message: "invalid_body",
+						});
+						return jsonErrorWithTrace(400, "invalid_body", "invalid_body");
+					}
+					const request = buildUpstreamImageRequest(
+						upstreamProvider,
+						normalizedImage,
+						upstreamModel,
+						metadata.endpoint_overrides,
+					);
+					if (!request) {
+						continue;
+					}
+					built = {
+						request,
+						bodyText: request.body ? JSON.stringify(request.body) : undefined,
+					};
+				}
+				if (!built) {
+					continue;
+				}
+				upstreamRequestPath = built.request.path;
+				absoluteUrl = built.request.absoluteUrl;
+				upstreamFallbackPath = built.request.absoluteUrl
+					? undefined
+					: built.request.fallbackPath;
+				upstreamBodyText = built.bodyText;
+			}
+			const shouldHandleStreamOptions =
+				upstreamProvider === "openai" &&
+				isStream &&
+				(endpointType === "chat" || endpointType === "responses");
+			let streamOptionsInjected = false;
+			let strippedStreamOptionsBodyText: string | undefined = upstreamBodyText;
+			if (shouldHandleStreamOptions) {
+				const capability = await loadStreamOptionsCapability(channel.id);
+				if (capability !== "unsupported") {
+					const injected = transformOpenAiStreamOptions(
+						upstreamBodyText,
+						"inject",
+					);
+					upstreamBodyText = injected.bodyText;
+					streamOptionsInjected = injected.injected;
+					const stripped = transformOpenAiStreamOptions(upstreamBodyText, "strip");
+					strippedStreamOptionsBodyText = stripped.bodyText;
+				} else {
+					const stripped = transformOpenAiStreamOptions(upstreamBodyText, "strip");
+					upstreamBodyText = stripped.bodyText;
+					strippedStreamOptionsBodyText = stripped.bodyText;
+				}
+			}
+			const targetBase = absoluteUrl ?? `${baseUrl}${upstreamRequestPath}`;
+			const target = mergeQuery(targetBase, querySuffix, metadata.query_overrides);
+			const fallbackTarget =
+				upstreamFallbackPath && !absoluteUrl
+					? mergeQuery(
+							`${baseUrl}${upstreamFallbackPath}`,
+							querySuffix,
+							metadata.query_overrides,
+						)
+					: undefined;
+			dispatchAttempts.push({
+				channelId: channel.id,
+				method: c.req.method,
+				target,
+				fallbackTarget,
+				headers: Array.from(headers.entries()),
+				bodyText: upstreamBodyText,
+				timeoutMs: upstreamTimeoutMs,
+				responsePath: upstreamRequestPath,
+				fallbackPath: upstreamFallbackPath,
+				streamOptionsInjected,
+				strippedBodyText: strippedStreamOptionsBodyText,
+			});
+			dispatchAttemptMeta.push({
+				channel,
+				upstreamProvider,
+				upstreamModel,
+				recordModel,
+				attemptStartedAt,
+				streamOptionsHandled: shouldHandleStreamOptions,
+			});
+		}
+		if (dispatchAttempts.length > 0) {
+			const dispatchResult = await executeDispatchViaWorker(
+				c,
+				{ attempts: dispatchAttempts },
+				attemptBindingPolicy,
+				attemptBindingState,
+			);
+			if (dispatchResult) {
+				dispatchHandled = true;
+				const resolvedIndex = Math.min(
+					dispatchAttemptMeta.length - 1,
+					Math.max(0, dispatchResult.attemptIndex),
+				);
+				const meta = dispatchAttemptMeta[resolvedIndex];
+				if (meta) {
+					const attemptNumber = resolvedIndex + 1;
+					const response = dispatchResult.response;
+					const responsePath = dispatchResult.responsePath;
+					const attemptLatencyMs = dispatchResult.latencyMs;
+					const attemptUpstreamRequestId = dispatchResult.upstreamRequestId;
+					lastChannel = meta.channel;
+					lastResponse = response;
+					lastRequestPath = responsePath;
+					if (response.ok) {
+						const hasUsageHeaderSignal = hasUsageHeaders(response.headers);
+						const headerUsage = parseUsageFromHeaders(response.headers);
+						let jsonUsage: NormalizedUsage | null = null;
+						let hasUsageJsonSignal = false;
+						if (
+							!isStream &&
+							response.headers.get("content-type")?.includes("application/json")
+						) {
+							const data = await response.clone().json().catch(() => null);
+							hasUsageJsonSignal = hasUsageJsonHint(data);
+							jsonUsage = parseUsageFromJson(data);
+						}
+						const immediateUsage = jsonUsage ?? headerUsage;
+						const immediateUsageSource = jsonUsage
+							? "json"
+							: headerUsage
+								? "header"
+								: "none";
+						if (!isStream && !immediateUsage) {
+							const usageMissingCode =
+								hasUsageHeaderSignal || hasUsageJsonSignal
+									? "usage_missing.non_stream.signal_present_unparseable"
+									: "usage_missing.non_stream.signal_absent";
+							const usageMissingMessage = `usage_missing: ${usageMissingCode}`;
+							lastErrorDetails = {
+								upstreamStatus: response.status,
+								errorCode: usageMissingCode,
+								errorMessage: usageMissingMessage,
+							};
+							recordAttemptUsage({
+								channelId: meta.channel.id,
+								requestPath: responsePath,
+								latencyMs: attemptLatencyMs,
+								firstTokenLatencyMs: attemptLatencyMs,
+								usage: null,
+								status: "error",
+								upstreamStatus: response.status,
+								errorCode: usageMissingCode,
+								errorMessage: usageMissingMessage,
+								failureStage: "usage_finalize",
+								failureReason: usageMissingCode,
+								usageSource: immediateUsageSource,
+							});
+							recordAttemptLog({
+								attemptIndex: attemptNumber,
+								channelId: meta.channel.id,
+								provider: meta.upstreamProvider,
+								model: meta.upstreamModel ?? downstreamModel,
+								status: "error",
+								errorClass: "usage_finalize",
+								errorCode: usageMissingCode,
+								httpStatus: response.status,
+								latencyMs: attemptLatencyMs,
+								upstreamRequestId: attemptUpstreamRequestId,
+								startedAt: meta.attemptStartedAt,
+								endedAt: new Date().toISOString(),
+							});
+						} else {
+							if (!isStream) {
+								recordAttemptUsage({
+									channelId: meta.channel.id,
+									requestPath: responsePath,
+									latencyMs: attemptLatencyMs,
+									firstTokenLatencyMs: attemptLatencyMs,
+									usage: immediateUsage,
+									status: "ok",
+									upstreamStatus: response.status,
+									failureStage: "usage_finalize",
+									usageSource: immediateUsageSource,
+								});
+							}
+							recordAttemptLog({
+								attemptIndex: attemptNumber,
+								channelId: meta.channel.id,
+								provider: meta.upstreamProvider,
+								model: meta.upstreamModel ?? downstreamModel,
+								status: "ok",
+								httpStatus: response.status,
+								latencyMs: attemptLatencyMs,
+								upstreamRequestId: attemptUpstreamRequestId,
+								startedAt: meta.attemptStartedAt,
+								endedAt: new Date().toISOString(),
+							});
+							selectedChannel = meta.channel;
+							selectedUpstreamProvider = meta.upstreamProvider;
+							try {
+								selectedUpstreamEndpoint = detectEndpointType(
+									meta.upstreamProvider,
+									responsePath,
+								);
+							} catch {
+								selectedUpstreamEndpoint = endpointType;
+							}
+							selectedUpstreamModel = meta.upstreamModel;
+							selectedResponse = response;
+							selectedRequestPath = responsePath;
+							selectedImmediateUsage = immediateUsage;
+							selectedHasUsageHeaders = hasUsageHeaderSignal;
+							lastErrorDetails = null;
+							if (meta.recordModel) {
+								scheduleUsageEvent({
+									type: "capability_upsert",
+									payload: {
+										channelId: meta.channel.id,
+										models: [meta.recordModel],
+										nowSeconds,
+									},
+								});
+							}
+						}
+					} else {
+						const errorInfo = await extractErrorDetails(response);
+						const normalizedErrorCode = normalizeUpstreamErrorCode(
+							errorInfo.errorCode,
+							response.status,
+						);
+						const normalizedErrorMessage =
+							normalizeMessage(errorInfo.errorMessage) ?? normalizedErrorCode;
+						const responsesToolCallMismatch =
+							downstreamProvider === "openai" &&
+							(responsesRequestHints?.hasFunctionCallOutput === true ||
+								hasChatToolOutput) &&
+							isResponsesToolCallNotFoundMessage(normalizedErrorMessage);
+						const streamOptionsUnsupported =
+							meta.streamOptionsHandled &&
+							isStreamOptionsUnsupportedMessage(normalizedErrorMessage);
+						if (responsesToolCallMismatch) {
+							responsesToolCallMismatchChannels.push(meta.channel.id);
+						}
+						const finalErrorCode = responsesToolCallMismatch
+							? "responses_tool_call_chain_mismatch"
+							: streamOptionsUnsupported
+								? "stream_options_unsupported"
+								: normalizedErrorCode;
+						lastErrorDetails = {
+							upstreamStatus: response.status,
+							errorCode: finalErrorCode,
+							errorMessage: normalizedErrorMessage,
+							errorMetaJson: errorInfo.errorMetaJson,
+						};
+						recordAttemptUsage({
+							channelId: meta.channel.id,
+							requestPath: responsePath,
+							latencyMs: attemptLatencyMs,
+							firstTokenLatencyMs: isStream ? null : attemptLatencyMs,
+							usage: null,
+							status: "error",
+							upstreamStatus: response.status,
+							errorCode: finalErrorCode,
+							errorMessage: normalizedErrorMessage,
+							failureStage: "upstream_response",
+							failureReason: finalErrorCode,
+							usageSource: "none",
+							errorMetaJson: errorInfo.errorMetaJson,
+						});
+						recordAttemptLog({
+							attemptIndex: attemptNumber,
+							channelId: meta.channel.id,
+							provider: meta.upstreamProvider,
+							model: meta.upstreamModel ?? downstreamModel,
+							status: "error",
+							errorClass: responsesToolCallMismatch
+								? "responses_tool_call_chain"
+								: streamOptionsUnsupported
+									? "stream_options"
+									: "upstream_response",
+							errorCode: finalErrorCode,
+							httpStatus: response.status,
+							latencyMs: attemptLatencyMs,
+							upstreamRequestId: attemptUpstreamRequestId,
+							startedAt: meta.attemptStartedAt,
+							endedAt: new Date().toISOString(),
+						});
+						const cooldownEligible = shouldCooldown(response.status, finalErrorCode);
+						if (meta.recordModel && cooldownSeconds > 0 && cooldownEligible) {
+							scheduleUsageEvent({
+								type: "model_error",
+								payload: {
+									channelId: meta.channel.id,
+									model: meta.recordModel,
+									errorCode: String(response.status),
+									nowSeconds,
+								},
+							});
+						}
+						if (
+							downstreamModel &&
+							downstreamModel !== meta.recordModel &&
+							cooldownSeconds > 0 &&
+							cooldownEligible
+						) {
+							scheduleUsageEvent({
+								type: "model_error",
+								payload: {
+									channelId: meta.channel.id,
+									model: downstreamModel,
+									errorCode: String(response.status),
+									nowSeconds,
+								},
+							});
+						}
+					}
+				}
+			}
+		}
+	}
+	if (!dispatchHandled) {
+		for (const [attemptIndex, channel] of ordered.entries()) {
 		const attemptNumber = attemptIndex + 1;
 		lastChannel = channel;
 		const attemptStart = Date.now();
@@ -3015,6 +3581,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 				});
 			}
 			lastResponse = null;
+		}
 		}
 	}
 
