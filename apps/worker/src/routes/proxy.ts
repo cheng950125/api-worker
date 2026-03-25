@@ -150,10 +150,16 @@ const ATTEMPT_BINDING_UPSTREAM_REQUEST_ID_HEADER =
 	"x-ha-attempt-upstream-request-id";
 const ATTEMPT_DISPATCH_INDEX_HEADER = "x-ha-dispatch-attempt-index";
 const ATTEMPT_DISPATCH_CHANNEL_ID_HEADER = "x-ha-dispatch-channel-id";
+const ATTEMPT_BINDING_DISPATCH_ERROR_CODE =
+	"attempt_binding_dispatch_unavailable";
+const ATTEMPT_BINDING_ATTEMPT_ERROR_CODE = "attempt_binding_call_unavailable";
 const HA_TRACE_ID_HEADER = "x-ha-trace-id";
 const HA_ATTEMPT_COUNT_HEADER = "x-ha-attempt-count";
 const HA_CANDIDATE_COUNT_HEADER = "x-ha-candidate-count";
 const MAX_ATTEMPT_WORKER_INVOCATIONS = 31;
+const HARD_STREAM_USAGE_MAX_BYTES = 256 * 1024;
+const HARD_STREAM_USAGE_MAX_PARSERS = 8;
+const HARD_STREAM_USAGE_PARSE_TIMEOUT_MS = 15000;
 
 let activeStreamUsageParsers = 0;
 
@@ -1296,20 +1302,44 @@ function getStreamUsageOptions(settings: {
 	stream_usage_mode: string;
 	stream_usage_max_bytes: number;
 }): StreamUsageOptions {
+	const configuredMaxBytes = Math.max(
+		0,
+		Math.floor(settings.stream_usage_max_bytes),
+	);
+	const effectiveMaxBytes =
+		configuredMaxBytes === 0
+			? HARD_STREAM_USAGE_MAX_BYTES
+			: Math.min(configuredMaxBytes, HARD_STREAM_USAGE_MAX_BYTES);
 	return {
 		mode: settings.stream_usage_mode as StreamUsageMode,
-		maxBytes: Math.max(0, Math.floor(settings.stream_usage_max_bytes)),
+		maxBytes: effectiveMaxBytes,
 	};
 }
 
 function getStreamUsageMaxParsers(settings: {
 	stream_usage_max_parsers: number;
 }): number {
-	const maxParsers = Math.max(0, Math.floor(settings.stream_usage_max_parsers));
-	if (maxParsers === 0) {
-		return Number.POSITIVE_INFINITY;
+	const configuredMaxParsers = Math.max(
+		0,
+		Math.floor(settings.stream_usage_max_parsers),
+	);
+	if (configuredMaxParsers === 0) {
+		return HARD_STREAM_USAGE_MAX_PARSERS;
 	}
-	return maxParsers;
+	return Math.min(configuredMaxParsers, HARD_STREAM_USAGE_MAX_PARSERS);
+}
+
+function getStreamUsageParseTimeoutMs(settings: {
+	stream_usage_parse_timeout_ms: number;
+}): number {
+	const configuredTimeoutMs = Math.max(
+		0,
+		Math.floor(settings.stream_usage_parse_timeout_ms),
+	);
+	if (configuredTimeoutMs === 0) {
+		return HARD_STREAM_USAGE_PARSE_TIMEOUT_MS;
+	}
+	return Math.min(configuredTimeoutMs, HARD_STREAM_USAGE_PARSE_TIMEOUT_MS);
 }
 
 function createUsageEventScheduler(
@@ -1660,14 +1690,16 @@ type DispatchBindingRequest = {
 	attempts: AttemptDispatchRequest[];
 };
 
-type AttemptBindingResult = {
+type AttemptBindingSuccess = {
+	kind: "success";
 	response: Response;
 	responsePath: string;
 	latencyMs: number;
 	upstreamRequestId: string | null;
 };
 
-type DispatchBindingResult = {
+type DispatchBindingSuccess = {
+	kind: "success";
 	response: Response;
 	responsePath: string;
 	latencyMs: number;
@@ -1675,6 +1707,16 @@ type DispatchBindingResult = {
 	attemptIndex: number;
 	channelId: string | null;
 };
+
+type AttemptBindingFailure = {
+	kind: "binding_error";
+	errorCode: string;
+	errorMessage: string;
+	latencyMs: number;
+};
+
+type AttemptBindingResult = AttemptBindingSuccess | AttemptBindingFailure;
+type DispatchBindingResult = DispatchBindingSuccess | AttemptBindingFailure;
 
 type AttemptBindingPolicy = {
 	fallbackEnabled: boolean;
@@ -1762,7 +1804,7 @@ async function executeAttemptViaWorker(
 	state: AttemptBindingState,
 ): Promise<AttemptBindingResult> {
 	const started = Date.now();
-	const executeLocalDirect = async (): Promise<AttemptBindingResult> => {
+	const executeLocalDirect = async (): Promise<AttemptBindingSuccess> => {
 		let response = await fetchWithTimeoutLocal(
 			input.target,
 			{
@@ -1789,6 +1831,7 @@ async function executeAttemptViaWorker(
 			responsePath = input.fallbackPath ?? input.responsePath;
 		}
 		return {
+			kind: "success",
 			response: response as unknown as Response,
 			responsePath,
 			latencyMs: Date.now() - started,
@@ -1820,6 +1863,7 @@ async function executeAttemptViaWorker(
 			response.headers.get(ATTEMPT_BINDING_LATENCY_HEADER),
 		);
 		return {
+			kind: "success",
 			response: response as unknown as Response,
 			responsePath,
 			latencyMs,
@@ -1828,8 +1872,17 @@ async function executeAttemptViaWorker(
 			),
 		};
 	} catch (error) {
+		const errorMessage = normalizeMessage(
+			error instanceof Error ? error.message : String(error),
+		);
 		if (!policy.fallbackEnabled) {
-			throw error;
+			return {
+				kind: "binding_error",
+				errorCode: ATTEMPT_BINDING_ATTEMPT_ERROR_CODE,
+				errorMessage:
+					errorMessage ?? "attempt worker call failed without fallback",
+				latencyMs: Date.now() - started,
+			};
 		}
 		state.bindingFailureCount += 1;
 		if (state.bindingFailureCount >= policy.fallbackThreshold) {
@@ -1845,6 +1898,7 @@ async function executeDispatchViaWorker(
 	policy: AttemptBindingPolicy,
 	state: AttemptBindingState,
 ): Promise<DispatchBindingResult | null> {
+	const started = Date.now();
 	const binding = c.env.ATTEMPT_WORKER;
 	if (!binding || state.forceLocalDirect || input.attempts.length === 0) {
 		return null;
@@ -1878,6 +1932,7 @@ async function executeDispatchViaWorker(
 				response.headers.get(ATTEMPT_DISPATCH_CHANNEL_ID_HEADER),
 			) ?? selectedAttempt.channelId;
 		return {
+			kind: "success",
 			response: response as unknown as Response,
 			responsePath,
 			latencyMs,
@@ -1888,8 +1943,17 @@ async function executeDispatchViaWorker(
 			channelId,
 		};
 	} catch (error) {
+		const errorMessage = normalizeMessage(
+			error instanceof Error ? error.message : String(error),
+		);
 		if (!policy.fallbackEnabled) {
-			throw error;
+			return {
+				kind: "binding_error",
+				errorCode: ATTEMPT_BINDING_DISPATCH_ERROR_CODE,
+				errorMessage:
+					errorMessage ?? "attempt worker dispatch failed without fallback",
+				latencyMs: Date.now() - started,
+			};
 		}
 		state.bindingFailureCount += 1;
 		if (state.bindingFailureCount >= policy.fallbackThreshold) {
@@ -1966,16 +2030,41 @@ proxy.all("/*", tokenAuth, async (c) => {
 			: Boolean(c.env.ATTEMPT_WORKER) &&
 				requestSizeBytes >= offloadThresholdBytes);
 	const shouldSkipHeavyBodyParsing = shouldTryLargeRequestDispatch;
+	let parsedBodyInitialized = !shouldSkipHeavyBodyParsing;
 	let parsedBody =
-		!shouldSkipHeavyBodyParsing && requestText
+		parsedBodyInitialized && requestText
 			? safeJsonParse<Record<string, unknown> | null>(requestText, null)
 			: null;
-	if (!shouldSkipHeavyBodyParsing && downstreamProvider === "openai") {
+	if (parsedBodyInitialized && downstreamProvider === "openai") {
 		repairOpenAiToolCallChainShared(parsedBody, endpointType);
 	}
-	const effectiveRequestText = parsedBody
-		? JSON.stringify(parsedBody)
-		: requestText;
+	let responsesRequestHints =
+		parsedBodyInitialized && downstreamProvider === "openai"
+			? extractResponsesRequestHintsShared(parsedBody)
+			: null;
+	let hasChatToolOutput =
+		parsedBodyInitialized && downstreamProvider === "openai"
+			? hasChatToolOutputHintShared(parsedBody)
+			: false;
+	let reasoningEffort = extractReasoningEffort(parsedBody);
+	let effectiveRequestText = parsedBody ? JSON.stringify(parsedBody) : requestText;
+	const ensureParsedBody = (): Record<string, unknown> | null => {
+		if (parsedBodyInitialized) {
+			return parsedBody;
+		}
+		parsedBodyInitialized = true;
+		parsedBody = requestText
+			? safeJsonParse<Record<string, unknown> | null>(requestText, null)
+			: null;
+		if (downstreamProvider === "openai") {
+			repairOpenAiToolCallChainShared(parsedBody, endpointType);
+			responsesRequestHints = extractResponsesRequestHintsShared(parsedBody);
+			hasChatToolOutput = hasChatToolOutputHintShared(parsedBody);
+		}
+		reasoningEffort = extractReasoningEffort(parsedBody);
+		effectiveRequestText = parsedBody ? JSON.stringify(parsedBody) : requestText;
+		return parsedBody;
+	};
 	const modelProbeBody =
 		parsedBody ??
 		(shouldSkipHeavyBodyParsing
@@ -1989,6 +2078,9 @@ proxy.all("/*", tokenAuth, async (c) => {
 		requestPath,
 		modelProbeBody,
 	);
+	if (shouldSkipHeavyBodyParsing && endpointType === "responses") {
+		ensureParsedBody();
+	}
 	const inferredStream =
 		shouldSkipHeavyBodyParsing && requestText
 			? detectStreamFlagFromRawJsonRequest(requestText)
@@ -1996,45 +2088,66 @@ proxy.all("/*", tokenAuth, async (c) => {
 	const isStream =
 		inferredStream ??
 		parseDownstreamStream(downstreamProvider, requestPath, parsedBody);
-	const responsesRequestHints =
-		!shouldSkipHeavyBodyParsing && downstreamProvider === "openai"
-			? extractResponsesRequestHintsShared(parsedBody)
-			: null;
-	const hasChatToolOutput =
-		!shouldSkipHeavyBodyParsing && downstreamProvider === "openai"
-			? hasChatToolOutputHintShared(parsedBody)
-			: false;
-	const reasoningEffort = extractReasoningEffort(parsedBody);
 	const scheduleUsageEvent = createUsageEventScheduler(c);
 	let normalizedChat: NormalizedChatRequest | null = null;
 	let normalizedEmbedding: NormalizedEmbeddingRequest | null = null;
 	let normalizedImage: NormalizedImageRequest | null = null;
-	if (
-		!shouldSkipHeavyBodyParsing &&
-		(endpointType === "chat" || endpointType === "responses")
-	) {
+	const ensureNormalizedChat = (): NormalizedChatRequest | null => {
+		if (endpointType !== "chat" && endpointType !== "responses") {
+			return null;
+		}
+		if (normalizedChat) {
+			return normalizedChat;
+		}
+		const ensuredBody = ensureParsedBody();
+		if (!ensuredBody) {
+			return null;
+		}
 		normalizedChat = normalizeChatRequest(
 			downstreamProvider,
 			endpointType,
-			parsedBody,
+			ensuredBody,
 			downstreamModel,
 			isStream,
 		);
-	}
-	if (!shouldSkipHeavyBodyParsing && endpointType === "embeddings") {
+		return normalizedChat;
+	};
+	const ensureNormalizedEmbedding = (): NormalizedEmbeddingRequest | null => {
+		if (endpointType !== "embeddings") {
+			return null;
+		}
+		if (normalizedEmbedding) {
+			return normalizedEmbedding;
+		}
+		const ensuredBody = ensureParsedBody();
+		if (!ensuredBody) {
+			return null;
+		}
 		normalizedEmbedding = normalizeEmbeddingRequest(
 			downstreamProvider,
-			parsedBody,
+			ensuredBody,
 			downstreamModel,
 		);
-	}
-	if (!shouldSkipHeavyBodyParsing && endpointType === "images") {
+		return normalizedEmbedding;
+	};
+	const ensureNormalizedImage = (): NormalizedImageRequest | null => {
+		if (endpointType !== "images") {
+			return null;
+		}
+		if (normalizedImage) {
+			return normalizedImage;
+		}
+		const ensuredBody = ensureParsedBody();
+		if (!ensuredBody) {
+			return null;
+		}
 		normalizedImage = normalizeImageRequest(
 			downstreamProvider,
-			parsedBody,
+			ensuredBody,
 			downstreamModel,
 		);
-	}
+		return normalizedImage;
+	};
 
 	const recordEarlyUsage = (options: {
 		status: number;
@@ -2157,7 +2270,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 			},
 		});
 	};
-	if (!shouldSkipHeavyBodyParsing) {
+	if (parsedBodyInitialized) {
 		const toolSchemaIssue = validateToolSchemasInBody(parsedBody);
 		if (toolSchemaIssue) {
 			recordEarlyUsage({
@@ -2444,10 +2557,8 @@ proxy.all("/*", tokenAuth, async (c) => {
 		Math.floor(runtimeSettings.stream_options_capability_ttl_seconds),
 	);
 	const usageErrorMessageMaxLength = INTERNAL_USAGE_ERROR_MESSAGE_MAX_LENGTH;
-	const streamUsageParseTimeoutMs = Math.max(
-		0,
-		Math.floor(runtimeSettings.stream_usage_parse_timeout_ms),
-	);
+	const streamUsageParseTimeoutMs =
+		getStreamUsageParseTimeoutMs(runtimeSettings);
 	if (
 		!responsesPinnedChannelId &&
 		downstreamModel &&
@@ -2683,17 +2794,13 @@ proxy.all("/*", tokenAuth, async (c) => {
 					bodyText?: string;
 				} | null = null;
 				if (endpointType === "chat" || endpointType === "responses") {
-					if (!normalizedChat) {
-						recordEarlyUsage({
-							status: 400,
-							code: "invalid_body",
-							message: "invalid_body",
-						});
-						return jsonErrorWithTrace(400, "invalid_body", "invalid_body");
+					const chatPayload = ensureNormalizedChat();
+					if (!chatPayload) {
+						continue;
 					}
 					const request = buildUpstreamChatRequest(
 						upstreamProvider,
-						normalizedChat,
+						chatPayload,
 						upstreamModel,
 						endpointType,
 						isStream,
@@ -2707,17 +2814,13 @@ proxy.all("/*", tokenAuth, async (c) => {
 						bodyText: request.body ? JSON.stringify(request.body) : undefined,
 					};
 				} else if (endpointType === "embeddings") {
-					if (!normalizedEmbedding) {
-						recordEarlyUsage({
-							status: 400,
-							code: "invalid_body",
-							message: "invalid_body",
-						});
-						return jsonErrorWithTrace(400, "invalid_body", "invalid_body");
+					const embeddingPayload = ensureNormalizedEmbedding();
+					if (!embeddingPayload) {
+						continue;
 					}
 					const request = buildUpstreamEmbeddingRequest(
 						upstreamProvider,
-						normalizedEmbedding,
+						embeddingPayload,
 						upstreamModel,
 						metadata.endpoint_overrides,
 					);
@@ -2729,17 +2832,13 @@ proxy.all("/*", tokenAuth, async (c) => {
 						bodyText: request.body ? JSON.stringify(request.body) : undefined,
 					};
 				} else if (endpointType === "images") {
-					if (!normalizedImage) {
-						recordEarlyUsage({
-							status: 400,
-							code: "invalid_body",
-							message: "invalid_body",
-						});
-						return jsonErrorWithTrace(400, "invalid_body", "invalid_body");
+					const imagePayload = ensureNormalizedImage();
+					if (!imagePayload) {
+						continue;
 					}
 					const request = buildUpstreamImageRequest(
 						upstreamProvider,
-						normalizedImage,
+						imagePayload,
 						upstreamModel,
 						metadata.endpoint_overrides,
 					);
@@ -2833,7 +2932,26 @@ proxy.all("/*", tokenAuth, async (c) => {
 				attemptBindingPolicy,
 				attemptBindingState,
 			);
-			if (dispatchResult) {
+			if (dispatchResult?.kind === "binding_error") {
+				recordEarlyUsage({
+					status: 503,
+					code: dispatchResult.errorCode,
+					message: dispatchResult.errorMessage,
+					failureStage: "attempt_dispatch",
+					failureReason: dispatchResult.errorCode,
+					usageSource: "none",
+					errorMetaJson: JSON.stringify({
+						type: "attempt_worker_binding_error",
+						latency_ms: dispatchResult.latencyMs,
+					}),
+				});
+				return jsonErrorWithTrace(
+					503,
+					dispatchResult.errorCode,
+					dispatchResult.errorCode,
+				);
+			}
+			if (dispatchResult?.kind === "success") {
 				dispatchHandled = true;
 				const resolvedIndex = Math.min(
 					dispatchAttemptMeta.length - 1,
@@ -2873,7 +2991,8 @@ proxy.all("/*", tokenAuth, async (c) => {
 							hasUsageHeaderSignal || hasUsageJsonSignal;
 						const failOnMissingUsage = shouldTreatMissingUsageAsError({
 							isStream,
-							bodyParsingSkipped: shouldSkipHeavyBodyParsing,
+							bodyParsingSkipped:
+								shouldSkipHeavyBodyParsing && !parsedBodyInitialized,
 							hasUsageSignal: hasAnyUsageSignal,
 						});
 						if (!isStream && !immediateUsage && failOnMissingUsage) {
@@ -3218,17 +3337,13 @@ proxy.all("/*", tokenAuth, async (c) => {
 				} | null = null;
 
 				if (endpointType === "chat" || endpointType === "responses") {
-					if (!normalizedChat) {
-						recordEarlyUsage({
-							status: 400,
-							code: "invalid_body",
-							message: "invalid_body",
-						});
-						return jsonErrorWithTrace(400, "invalid_body", "invalid_body");
+					const chatPayload = ensureNormalizedChat();
+					if (!chatPayload) {
+						continue;
 					}
 					const request = buildUpstreamChatRequest(
 						upstreamProvider,
-						normalizedChat,
+						chatPayload,
 						upstreamModel,
 						endpointType,
 						isStream,
@@ -3242,17 +3357,13 @@ proxy.all("/*", tokenAuth, async (c) => {
 						bodyText: request.body ? JSON.stringify(request.body) : undefined,
 					};
 				} else if (endpointType === "embeddings") {
-					if (!normalizedEmbedding) {
-						recordEarlyUsage({
-							status: 400,
-							code: "invalid_body",
-							message: "invalid_body",
-						});
-						return jsonErrorWithTrace(400, "invalid_body", "invalid_body");
+					const embeddingPayload = ensureNormalizedEmbedding();
+					if (!embeddingPayload) {
+						continue;
 					}
 					const request = buildUpstreamEmbeddingRequest(
 						upstreamProvider,
-						normalizedEmbedding,
+						embeddingPayload,
 						upstreamModel,
 						metadata.endpoint_overrides,
 					);
@@ -3264,17 +3375,13 @@ proxy.all("/*", tokenAuth, async (c) => {
 						bodyText: request.body ? JSON.stringify(request.body) : undefined,
 					};
 				} else if (endpointType === "images") {
-					if (!normalizedImage) {
-						recordEarlyUsage({
-							status: 400,
-							code: "invalid_body",
-							message: "invalid_body",
-						});
-						return jsonErrorWithTrace(400, "invalid_body", "invalid_body");
+					const imagePayload = ensureNormalizedImage();
+					if (!imagePayload) {
+						continue;
 					}
 					const request = buildUpstreamImageRequest(
 						upstreamProvider,
-						normalizedImage,
+						imagePayload,
 						upstreamModel,
 						metadata.endpoint_overrides,
 					);
@@ -3345,12 +3452,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 							)
 						: undefined;
 
-				let {
-					response,
-					responsePath,
-					latencyMs: attemptLatencyMs,
-					upstreamRequestId: attemptUpstreamRequestId,
-				} = await executeAttemptViaWorker(
+				const attemptResult = await executeAttemptViaWorker(
 					c,
 					{
 						method: c.req.method,
@@ -3365,6 +3467,60 @@ proxy.all("/*", tokenAuth, async (c) => {
 					attemptBindingPolicy,
 					attemptBindingState,
 				);
+				if (attemptResult.kind === "binding_error") {
+					lastErrorDetails = {
+						upstreamStatus: null,
+						errorCode: attemptResult.errorCode,
+						errorMessage: attemptResult.errorMessage,
+						errorMetaJson: JSON.stringify({
+							type: "attempt_worker_binding_error",
+							latency_ms: attemptResult.latencyMs,
+						}),
+					};
+					recordAttemptUsage({
+						channelId: channel.id,
+						requestPath: upstreamRequestPath,
+						latencyMs: attemptResult.latencyMs,
+						firstTokenLatencyMs: null,
+						usage: null,
+						status: "error",
+						upstreamStatus: null,
+						errorCode: attemptResult.errorCode,
+						errorMessage: attemptResult.errorMessage,
+						failureStage: "attempt_call",
+						failureReason: attemptResult.errorCode,
+						usageSource: "none",
+						errorMetaJson: lastErrorDetails.errorMetaJson ?? null,
+					});
+					recordAttemptLog({
+						attemptIndex: attemptNumber,
+						channelId: channel.id,
+						provider: upstreamProvider,
+						model: upstreamModel ?? downstreamModel,
+						status: "error",
+						errorClass: "attempt_binding",
+						errorCode: attemptResult.errorCode,
+						httpStatus: null,
+						latencyMs: attemptResult.latencyMs,
+						startedAt: attemptStartedAt,
+						endedAt: new Date().toISOString(),
+					});
+					appendAttemptFailure({
+						attemptIndex: attemptNumber,
+						channel,
+						httpStatus: null,
+						errorCode: attemptResult.errorCode,
+						errorMessage: attemptResult.errorMessage,
+						latencyMs: attemptResult.latencyMs,
+					});
+					continue;
+				}
+				let {
+					response,
+					responsePath,
+					latencyMs: attemptLatencyMs,
+					upstreamRequestId: attemptUpstreamRequestId,
+				} = attemptResult;
 
 				if (
 					shouldHandleStreamOptions &&
@@ -3389,6 +3545,54 @@ proxy.all("/*", tokenAuth, async (c) => {
 							attemptBindingPolicy,
 							attemptBindingState,
 						);
+						if (retried.kind === "binding_error") {
+							lastErrorDetails = {
+								upstreamStatus: null,
+								errorCode: retried.errorCode,
+								errorMessage: retried.errorMessage,
+								errorMetaJson: JSON.stringify({
+									type: "attempt_worker_binding_error",
+									latency_ms: retried.latencyMs,
+								}),
+							};
+							recordAttemptUsage({
+								channelId: channel.id,
+								requestPath: upstreamRequestPath,
+								latencyMs: retried.latencyMs,
+								firstTokenLatencyMs: null,
+								usage: null,
+								status: "error",
+								upstreamStatus: null,
+								errorCode: retried.errorCode,
+								errorMessage: retried.errorMessage,
+								failureStage: "attempt_call",
+								failureReason: retried.errorCode,
+								usageSource: "none",
+								errorMetaJson: lastErrorDetails.errorMetaJson ?? null,
+							});
+							recordAttemptLog({
+								attemptIndex: attemptNumber,
+								channelId: channel.id,
+								provider: upstreamProvider,
+								model: upstreamModel ?? downstreamModel,
+								status: "error",
+								errorClass: "attempt_binding",
+								errorCode: retried.errorCode,
+								httpStatus: null,
+								latencyMs: retried.latencyMs,
+								startedAt: attemptStartedAt,
+								endedAt: new Date().toISOString(),
+							});
+							appendAttemptFailure({
+								attemptIndex: attemptNumber,
+								channel,
+								httpStatus: null,
+								errorCode: retried.errorCode,
+								errorMessage: retried.errorMessage,
+								latencyMs: retried.latencyMs,
+							});
+							continue;
+						}
 						response = retried.response;
 						responsePath = retried.responsePath;
 						attemptLatencyMs = retried.latencyMs;
@@ -3425,7 +3629,8 @@ proxy.all("/*", tokenAuth, async (c) => {
 						hasUsageHeaderSignal || hasUsageJsonSignal;
 					const failOnMissingUsage = shouldTreatMissingUsageAsError({
 						isStream,
-						bodyParsingSkipped: shouldSkipHeavyBodyParsing,
+						bodyParsingSkipped:
+							shouldSkipHeavyBodyParsing && !parsedBodyInitialized,
 						hasUsageSignal: hasAnyUsageSignal,
 					});
 					if (!isStream && !immediateUsage && failOnMissingUsage) {

@@ -10,10 +10,6 @@ export type Bindings = {
 	KV_HOT?: KVNamespace;
 	ATTEMPT_WORKER?: Fetcher;
 	CORS_ORIGIN?: string;
-	PROXY_UPSTREAM_TIMEOUT_MS?: string;
-	PROXY_STREAM_USAGE_MODE?: string;
-	PROXY_STREAM_USAGE_MAX_BYTES?: string;
-	PROXY_STREAM_USAGE_MAX_PARSERS?: string;
 	CACHE_VERSION_STORE?: DurableObjectNamespace;
 	CHECKIN_SCHEDULER: DurableObjectNamespace;
 };
