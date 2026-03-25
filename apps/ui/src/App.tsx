@@ -675,21 +675,24 @@ const App = () => {
 		}
 		const runtimeSettings =
 			data.settings.runtime_settings ?? data.settings.runtime_config;
+		const usageQueueDirectPercent = Math.round(
+			(runtimeSettings?.usage_queue_direct_write_ratio ?? 0.4) * 100,
+		);
 		setSettingsForm({
 			log_retention_days: String(data.settings.log_retention_days ?? 30),
 			session_ttl_hours: String(data.settings.session_ttl_hours ?? 12),
 			admin_password: "",
 			checkin_schedule_time: data.settings.checkin_schedule_time ?? "00:10",
 			proxy_model_failure_cooldown_minutes: String(
-				runtimeSettings?.model_failure_cooldown_minutes ?? 10,
+				runtimeSettings?.model_failure_cooldown_minutes ?? 60,
 			),
 			proxy_model_failure_cooldown_threshold: String(
-				runtimeSettings?.model_failure_cooldown_threshold ?? 2,
+				runtimeSettings?.model_failure_cooldown_threshold ?? 3,
 			),
 			proxy_upstream_timeout_ms: String(
-				runtimeSettings?.upstream_timeout_ms ?? 30000,
+				runtimeSettings?.upstream_timeout_ms ?? 180000,
 			),
-			proxy_retry_max_retries: String(runtimeSettings?.retry_max_retries ?? 3),
+			proxy_retry_max_retries: String(runtimeSettings?.retry_max_retries ?? 5),
 			proxy_stream_usage_mode: runtimeSettings?.stream_usage_mode ?? "full",
 			proxy_stream_usage_max_bytes: String(
 				runtimeSettings?.stream_usage_max_bytes ?? 0,
@@ -698,7 +701,7 @@ const App = () => {
 				runtimeSettings?.stream_usage_max_parsers ?? 0,
 			),
 			proxy_stream_usage_parse_timeout_ms: String(
-				runtimeSettings?.stream_usage_parse_timeout_ms ?? 20000,
+				runtimeSettings?.stream_usage_parse_timeout_ms ?? 0,
 			),
 			proxy_responses_affinity_ttl_seconds: String(
 				runtimeSettings?.responses_affinity_ttl_seconds ?? 86400,
@@ -710,13 +713,11 @@ const App = () => {
 			usage_queue_daily_limit: String(
 				runtimeSettings?.usage_queue_daily_limit ?? 10000,
 			),
-			usage_queue_direct_write_ratio: String(
-				runtimeSettings?.usage_queue_direct_write_ratio ?? 0.5,
-			),
+			usage_queue_direct_write_ratio: String(usageQueueDirectPercent),
 			proxy_attempt_worker_fallback_enabled:
-				runtimeSettings?.attempt_worker_fallback_enabled ?? false,
+				runtimeSettings?.attempt_worker_fallback_enabled ?? true,
 			proxy_attempt_worker_fallback_threshold: String(
-				runtimeSettings?.attempt_worker_fallback_threshold ?? 2,
+				runtimeSettings?.attempt_worker_fallback_threshold ?? 3,
 			),
 			proxy_large_request_offload_threshold_bytes: String(
 				runtimeSettings?.large_request_offload_threshold_bytes ?? 32768,
@@ -1365,7 +1366,7 @@ const App = () => {
 				settingsForm.proxy_stream_options_capability_ttl_seconds,
 			);
 			const usageQueueDailyLimit = Number(settingsForm.usage_queue_daily_limit);
-			const usageQueueDirectRatio = Number(
+			const usageQueueDirectPercent = Number(
 				settingsForm.usage_queue_direct_write_ratio,
 			);
 			const attemptWorkerFallbackThreshold = Number(
@@ -1447,11 +1448,12 @@ const App = () => {
 				return;
 			}
 			if (
-				Number.isNaN(usageQueueDirectRatio) ||
-				usageQueueDirectRatio < 0 ||
-				usageQueueDirectRatio > 1
+				Number.isNaN(usageQueueDirectPercent) ||
+				usageQueueDirectPercent < 0 ||
+				usageQueueDirectPercent > 100 ||
+				!Number.isInteger(usageQueueDirectPercent)
 			) {
-				pushNotice("warning", "直写比例需在 0-1 之间");
+				pushNotice("warning", "直写比例需为 0-100 的整数");
 				return;
 			}
 			if (
@@ -1492,7 +1494,7 @@ const App = () => {
 					streamOptionsCapabilityTtlSeconds,
 				proxy_usage_queue_enabled: settingsForm.proxy_usage_queue_enabled,
 				usage_queue_daily_limit: usageQueueDailyLimit,
-				usage_queue_direct_write_ratio: usageQueueDirectRatio,
+				usage_queue_direct_write_ratio: usageQueueDirectPercent / 100,
 				proxy_attempt_worker_fallback_enabled:
 					settingsForm.proxy_attempt_worker_fallback_enabled,
 				proxy_attempt_worker_fallback_threshold: attemptWorkerFallbackThreshold,

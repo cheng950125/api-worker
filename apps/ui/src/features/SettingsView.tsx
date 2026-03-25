@@ -677,26 +677,33 @@ export const SettingsView = ({
                   class="app-settings-row__label"
                   for="usage-queue-direct-ratio"
                 >
-                  直写比例（0-1）
+                  直写比例（%）
                 </label>
-                <p class="app-settings-row__hint">示例：0.5 表示 50% 直写。</p>
+                <p class="app-settings-row__hint">
+                  输入 0-100 的整数，例如 40 表示 40% 直写。
+                </p>
               </div>
-              <Input
-                class="app-settings-row__control app-settings-row__control--compact"
-                id="usage-queue-direct-ratio"
-                name="usage_queue_direct_write_ratio"
-                type="number"
-                min="0"
-                max="1"
-                step="0.01"
-                value={settingsForm.usage_queue_direct_write_ratio}
-                onInput={(event) => {
-                  const target = event.currentTarget as HTMLInputElement | null;
-                  onFormChange({
-                    usage_queue_direct_write_ratio: target?.value ?? "",
-                  });
-                }}
-              />
+              <div class="relative app-settings-row__control app-settings-row__control--compact">
+                <Input
+                  class="w-full pr-6"
+                  id="usage-queue-direct-ratio"
+                  name="usage_queue_direct_write_ratio"
+                  type="number"
+                  min="0"
+                  max="100"
+                  step="1"
+                  value={settingsForm.usage_queue_direct_write_ratio}
+                  onInput={(event) => {
+                    const target = event.currentTarget as HTMLInputElement | null;
+                    onFormChange({
+                      usage_queue_direct_write_ratio: target?.value ?? "",
+                    });
+                  }}
+                />
+                <span class="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-xs text-[color:var(--app-ink-muted)]">
+                  %
+                </span>
+              </div>
             </div>
           </div>
           <div class="app-settings-stats">
