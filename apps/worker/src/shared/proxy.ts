@@ -38,6 +38,7 @@ import {
 	buildCallTokensIndexKey,
 	buildResponsesAffinityKey,
 	buildStreamOptionsCapabilityKey,
+	invalidateSelectionHotCache,
 	readHotJson,
 	writeHotJson,
 } from "../../../worker/src/services/hot-kv";
@@ -139,6 +140,7 @@ const STREAM_USAGE_NON_ERROR_THROWN_CODE =
 const PROXY_UPSTREAM_TIMEOUT_ERROR_CODE = "proxy_upstream_timeout";
 const PROXY_UPSTREAM_FETCH_ERROR_CODE = "proxy_upstream_fetch_exception";
 const USAGE_ZERO_COMPLETION_TOKENS_ERROR_CODE = "usage_zero_completion_tokens";
+const ABNORMAL_SUCCESS_RESPONSE_ERROR_CODE = "abnormal_success_response";
 const INTERNAL_USAGE_ERROR_MESSAGE_MAX_LENGTH = 320;
 const UPSTREAM_ERROR_DETAIL_MAX_LENGTH = 240;
 const HOT_KV_ACTIVE_CHANNELS_TTL_SECONDS = 60;
@@ -1432,8 +1434,97 @@ function createUsageEventScheduler(c: {
 	executionCtx?: ExecutionContextLike;
 }): (event: UsageEvent) => void {
 	return (event: UsageEvent) => {
-		const task = processUsageEvent(c.env.DB, event).catch(() => undefined);
+		const task = processUsageEvent(c.env.DB, event)
+			.then((result) => {
+				if (!result.channelDisabled) {
+					return;
+				}
+				return invalidateSelectionHotCache(c.env.KV_HOT);
+			})
+			.catch(() => undefined);
 		scheduleDbWrite(c, task);
+	};
+}
+
+function extractJsonErrorPayload(
+	payload: Record<string, unknown>,
+	status: number,
+): {
+	errorCode: string | null;
+	errorMessage: string | null;
+	errorMetaJson: string | null;
+} {
+	const raw = payload as Record<string, unknown>;
+	const error =
+		raw.error && typeof raw.error === "object"
+			? (raw.error as Record<string, unknown>)
+			: raw;
+	const errorCode =
+		typeof error.code === "string"
+			? error.code
+			: typeof error.type === "string"
+				? error.type
+				: null;
+	const errorMessage =
+		typeof error.message === "string"
+			? error.message
+			: typeof raw.message === "string"
+				? raw.message
+				: null;
+	const param =
+		typeof error.param === "string"
+			? error.param
+			: typeof raw.param === "string"
+				? raw.param
+				: null;
+	const normalizedErrorMessage = normalizeMessage(errorMessage);
+	return {
+		errorCode,
+		errorMessage: `upstream_json_error: status=${status}, code=${errorCode ?? "-"}, message=${
+			normalizedErrorMessage
+				? normalizeSummaryDetail(
+						normalizedErrorMessage,
+						UPSTREAM_ERROR_DETAIL_MAX_LENGTH,
+					)
+				: "-"
+		}`,
+		errorMetaJson: JSON.stringify({
+			type: "json_error",
+			param,
+			status,
+		}),
+	};
+}
+
+async function detectAbnormalSuccessResponse(response: Response): Promise<{
+	errorCode: string;
+	errorMessage: string;
+	errorMetaJson: string | null;
+} | null> {
+	const contentType = response.headers.get("content-type") ?? "";
+	if (!contentType.includes("application/json")) {
+		return null;
+	}
+	const payload = await response
+		.clone()
+		.json()
+		.catch(() => null);
+	if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+		return null;
+	}
+	const record = payload as Record<string, unknown>;
+	if (!("error" in record)) {
+		return null;
+	}
+	const details = extractJsonErrorPayload(record, response.status);
+	const normalizedCode = normalizeMessage(details.errorCode);
+	const finalErrorCode = normalizedCode ?? ABNORMAL_SUCCESS_RESPONSE_ERROR_CODE;
+	const finalErrorMessage =
+		normalizeMessage(details.errorMessage) ?? finalErrorCode;
+	return {
+		errorCode: finalErrorCode,
+		errorMessage: finalErrorMessage,
+		errorMetaJson: details.errorMetaJson,
 	};
 }
 
@@ -1442,55 +1533,6 @@ async function extractErrorDetails(response: Response): Promise<{
 	errorMessage: string | null;
 	errorMetaJson: string | null;
 }> {
-	const extractJsonError = (
-		payload: Record<string, unknown>,
-	): {
-		errorCode: string | null;
-		errorMessage: string | null;
-		errorMetaJson: string | null;
-	} => {
-		const raw = payload as Record<string, unknown>;
-		const error =
-			raw.error && typeof raw.error === "object"
-				? (raw.error as Record<string, unknown>)
-				: raw;
-		const errorCode =
-			typeof error.code === "string"
-				? error.code
-				: typeof error.type === "string"
-					? error.type
-					: null;
-		const errorMessage =
-			typeof error.message === "string"
-				? error.message
-				: typeof raw.message === "string"
-					? raw.message
-					: null;
-		const param =
-			typeof error.param === "string"
-				? error.param
-				: typeof raw.param === "string"
-					? raw.param
-					: null;
-		const normalizedErrorMessage = normalizeMessage(errorMessage);
-		return {
-			errorCode,
-			errorMessage: `upstream_json_error: status=${response.status}, code=${errorCode ?? "-"}, message=${
-				normalizedErrorMessage
-					? normalizeSummaryDetail(
-							normalizedErrorMessage,
-							UPSTREAM_ERROR_DETAIL_MAX_LENGTH,
-						)
-					: "-"
-			}`,
-			errorMetaJson: JSON.stringify({
-				type: "json_error",
-				param,
-				status: response.status,
-			}),
-		};
-	};
-
 	const contentType = response.headers.get("content-type") ?? "";
 	if (contentType.includes("application/json")) {
 		const payload = await response
@@ -1498,7 +1540,10 @@ async function extractErrorDetails(response: Response): Promise<{
 			.json()
 			.catch(() => null);
 		if (payload && typeof payload === "object") {
-			return extractJsonError(payload as Record<string, unknown>);
+			return extractJsonErrorPayload(
+				payload as Record<string, unknown>,
+				response.status,
+			);
 		}
 	}
 	const text = await response
@@ -1510,7 +1555,7 @@ async function extractErrorDetails(response: Response): Promise<{
 		null,
 	);
 	if (payloadFromText && typeof payloadFromText === "object") {
-		return extractJsonError(payloadFromText);
+		return extractJsonErrorPayload(payloadFromText, response.status);
 	}
 	const normalizedText = normalizeMessage(text);
 	if (!normalizedText) {
@@ -2662,6 +2707,10 @@ proxy.all("/*", tokenAuth, async (c) => {
 		1,
 		Math.floor(runtimeSettings.model_failure_cooldown_threshold),
 	);
+	const cooldownAutoDisableThreshold = Math.max(
+		1,
+		Math.floor(runtimeSettings.model_failure_auto_disable_threshold),
+	);
 	const responsesAffinityTtlSeconds = Math.max(
 		60,
 		Math.floor(runtimeSettings.responses_affinity_ttl_seconds),
@@ -2766,6 +2815,35 @@ proxy.all("/*", tokenAuth, async (c) => {
 			errorCode: options.errorCode,
 			errorMessage: options.errorMessage,
 			latencyMs: options.latencyMs,
+		});
+	};
+	const scheduleModelError = (options: {
+		channelId: string;
+		model: string | null;
+		upstreamStatus: number | null;
+		errorCode: string | null;
+	}) => {
+		if (!options.model || cooldownSeconds <= 0) {
+			return;
+		}
+		if (!shouldCooldown(options.upstreamStatus, options.errorCode)) {
+			return;
+		}
+		scheduleUsageEvent({
+			type: "model_error",
+			payload: {
+				channelId: options.channelId,
+				model: options.model,
+				errorCode:
+					normalizeMessage(options.errorCode) ??
+					(options.upstreamStatus === null
+						? ABNORMAL_SUCCESS_RESPONSE_ERROR_CODE
+						: String(options.upstreamStatus)),
+				cooldownSeconds,
+				cooldownFailureThreshold,
+				cooldownDisableThreshold: cooldownAutoDisableThreshold,
+				nowSeconds,
+			},
 		});
 	};
 	const continueAfterFailure = async (
@@ -3129,37 +3207,29 @@ proxy.all("/*", tokenAuth, async (c) => {
 							: headerUsage
 								? "header"
 								: "none";
-						const hasAnyUsageSignal =
-							hasUsageHeaderSignal || hasUsageJsonSignal;
-						const failOnMissingUsage = shouldTreatMissingUsageAsError({
-							isStream,
-							bodyParsingSkipped:
-								shouldSkipHeavyBodyParsing && !parsedBodyInitialized,
-							hasUsageSignal: hasAnyUsageSignal,
-						});
-						if (!isStream && !immediateUsage && failOnMissingUsage) {
-							const usageMissingCode = hasAnyUsageSignal
-								? "usage_missing.non_stream.signal_present_unparseable"
-								: "usage_missing.non_stream.signal_absent";
-							const usageMissingMessage = `usage_missing: ${usageMissingCode}`;
+						const abnormalSuccess =
+							await detectAbnormalSuccessResponse(response);
+						if (abnormalSuccess) {
 							lastErrorDetails = {
 								upstreamStatus: response.status,
-								errorCode: usageMissingCode,
-								errorMessage: usageMissingMessage,
+								errorCode: abnormalSuccess.errorCode,
+								errorMessage: abnormalSuccess.errorMessage,
+								errorMetaJson: abnormalSuccess.errorMetaJson,
 							};
 							recordAttemptUsage({
 								channelId: meta.channel.id,
 								requestPath: responsePath,
 								latencyMs: attemptLatencyMs,
-								firstTokenLatencyMs: attemptLatencyMs,
+								firstTokenLatencyMs: isStream ? null : attemptLatencyMs,
 								usage: null,
 								status: "error",
 								upstreamStatus: response.status,
-								errorCode: usageMissingCode,
-								errorMessage: usageMissingMessage,
-								failureStage: "usage_finalize",
-								failureReason: usageMissingCode,
-								usageSource: immediateUsageSource,
+								errorCode: abnormalSuccess.errorCode,
+								errorMessage: abnormalSuccess.errorMessage,
+								failureStage: "upstream_response",
+								failureReason: abnormalSuccess.errorCode,
+								usageSource: "none",
+								errorMetaJson: abnormalSuccess.errorMetaJson,
 							});
 							recordAttemptLog({
 								attemptIndex: attemptNumber,
@@ -3167,8 +3237,8 @@ proxy.all("/*", tokenAuth, async (c) => {
 								provider: meta.upstreamProvider,
 								model: meta.upstreamModel ?? downstreamModel,
 								status: "error",
-								errorClass: "usage_finalize",
-								errorCode: usageMissingCode,
+								errorClass: "upstream_response",
+								errorCode: abnormalSuccess.errorCode,
 								httpStatus: response.status,
 								latencyMs: attemptLatencyMs,
 								upstreamRequestId: attemptUpstreamRequestId,
@@ -3179,110 +3249,207 @@ proxy.all("/*", tokenAuth, async (c) => {
 								attemptIndex: attemptNumber,
 								channel: meta.channel,
 								httpStatus: response.status,
-								errorCode: usageMissingCode,
-								errorMessage: usageMissingMessage,
+								errorCode: abnormalSuccess.errorCode,
+								errorMessage: abnormalSuccess.errorMessage,
 								latencyMs: attemptLatencyMs,
 							});
-						} else if (
-							shouldTreatZeroCompletionAsError({
-								enabled: zeroCompletionAsErrorEnabled,
-								endpointType,
-								usage: immediateUsage,
-							})
-						) {
-							const zeroCompletionMessage = `${USAGE_ZERO_COMPLETION_TOKENS_ERROR_CODE}: completion_tokens=${immediateUsage?.completionTokens ?? 0}`;
-							lastErrorDetails = {
-								upstreamStatus: response.status,
-								errorCode: USAGE_ZERO_COMPLETION_TOKENS_ERROR_CODE,
-								errorMessage: zeroCompletionMessage,
-							};
-							recordAttemptUsage({
+							scheduleModelError({
 								channelId: meta.channel.id,
-								requestPath: responsePath,
-								latencyMs: attemptLatencyMs,
-								firstTokenLatencyMs: attemptLatencyMs,
-								usage: immediateUsage,
-								status: "error",
+								model: meta.recordModel,
 								upstreamStatus: response.status,
-								errorCode: USAGE_ZERO_COMPLETION_TOKENS_ERROR_CODE,
-								errorMessage: zeroCompletionMessage,
-								failureStage: "usage_finalize",
-								failureReason: USAGE_ZERO_COMPLETION_TOKENS_ERROR_CODE,
-								usageSource: immediateUsageSource,
+								errorCode: abnormalSuccess.errorCode,
 							});
-							recordAttemptLog({
-								attemptIndex: attemptNumber,
-								channelId: meta.channel.id,
-								provider: meta.upstreamProvider,
-								model: meta.upstreamModel ?? downstreamModel,
-								status: "error",
-								errorClass: "usage_finalize",
-								errorCode: USAGE_ZERO_COMPLETION_TOKENS_ERROR_CODE,
-								httpStatus: response.status,
-								latencyMs: attemptLatencyMs,
-								upstreamRequestId: attemptUpstreamRequestId,
-								startedAt: meta.attemptStartedAt,
-								endedAt: new Date().toISOString(),
-							});
-							appendAttemptFailure({
-								attemptIndex: attemptNumber,
-								channel: meta.channel,
-								httpStatus: response.status,
-								errorCode: USAGE_ZERO_COMPLETION_TOKENS_ERROR_CODE,
-								errorMessage: zeroCompletionMessage,
-								latencyMs: attemptLatencyMs,
-							});
+							if (downstreamModel && downstreamModel !== meta.recordModel) {
+								scheduleModelError({
+									channelId: meta.channel.id,
+									model: downstreamModel,
+									upstreamStatus: response.status,
+									errorCode: abnormalSuccess.errorCode,
+								});
+							}
+							if (
+								!(await continueAfterFailure(
+									abnormalSuccess.errorCode,
+									abnormalSuccess.errorMessage,
+									attemptNumber,
+								))
+							) {
+								dispatchStopRetry = true;
+							}
 						} else {
-							if (!isStream) {
+							const hasAnyUsageSignal =
+								hasUsageHeaderSignal || hasUsageJsonSignal;
+							const failOnMissingUsage = shouldTreatMissingUsageAsError({
+								isStream,
+								bodyParsingSkipped:
+									shouldSkipHeavyBodyParsing && !parsedBodyInitialized,
+								hasUsageSignal: hasAnyUsageSignal,
+							});
+							if (!isStream && !immediateUsage && failOnMissingUsage) {
+								const usageMissingCode = hasAnyUsageSignal
+									? "usage_missing.non_stream.signal_present_unparseable"
+									: "usage_missing.non_stream.signal_absent";
+								const usageMissingMessage = `usage_missing: ${usageMissingCode}`;
+								lastErrorDetails = {
+									upstreamStatus: response.status,
+									errorCode: usageMissingCode,
+									errorMessage: usageMissingMessage,
+								};
+								recordAttemptUsage({
+									channelId: meta.channel.id,
+									requestPath: responsePath,
+									latencyMs: attemptLatencyMs,
+									firstTokenLatencyMs: attemptLatencyMs,
+									usage: null,
+									status: "error",
+									upstreamStatus: response.status,
+									errorCode: usageMissingCode,
+									errorMessage: usageMissingMessage,
+									failureStage: "usage_finalize",
+									failureReason: usageMissingCode,
+									usageSource: immediateUsageSource,
+								});
+								recordAttemptLog({
+									attemptIndex: attemptNumber,
+									channelId: meta.channel.id,
+									provider: meta.upstreamProvider,
+									model: meta.upstreamModel ?? downstreamModel,
+									status: "error",
+									errorClass: "usage_finalize",
+									errorCode: usageMissingCode,
+									httpStatus: response.status,
+									latencyMs: attemptLatencyMs,
+									upstreamRequestId: attemptUpstreamRequestId,
+									startedAt: meta.attemptStartedAt,
+									endedAt: new Date().toISOString(),
+								});
+								appendAttemptFailure({
+									attemptIndex: attemptNumber,
+									channel: meta.channel,
+									httpStatus: response.status,
+									errorCode: usageMissingCode,
+									errorMessage: usageMissingMessage,
+									latencyMs: attemptLatencyMs,
+								});
+								if (
+									!(await continueAfterFailure(
+										usageMissingCode,
+										usageMissingMessage,
+										attemptNumber,
+									))
+								) {
+									dispatchStopRetry = true;
+								}
+							} else if (
+								shouldTreatZeroCompletionAsError({
+									enabled: zeroCompletionAsErrorEnabled,
+									endpointType,
+									usage: immediateUsage,
+								})
+							) {
+								const zeroCompletionMessage = `${USAGE_ZERO_COMPLETION_TOKENS_ERROR_CODE}: completion_tokens=${immediateUsage?.completionTokens ?? 0}`;
+								lastErrorDetails = {
+									upstreamStatus: response.status,
+									errorCode: USAGE_ZERO_COMPLETION_TOKENS_ERROR_CODE,
+									errorMessage: zeroCompletionMessage,
+								};
 								recordAttemptUsage({
 									channelId: meta.channel.id,
 									requestPath: responsePath,
 									latencyMs: attemptLatencyMs,
 									firstTokenLatencyMs: attemptLatencyMs,
 									usage: immediateUsage,
-									status: "ok",
+									status: "error",
 									upstreamStatus: response.status,
+									errorCode: USAGE_ZERO_COMPLETION_TOKENS_ERROR_CODE,
+									errorMessage: zeroCompletionMessage,
 									failureStage: "usage_finalize",
+									failureReason: USAGE_ZERO_COMPLETION_TOKENS_ERROR_CODE,
 									usageSource: immediateUsageSource,
 								});
-							}
-							recordAttemptLog({
-								attemptIndex: attemptNumber,
-								channelId: meta.channel.id,
-								provider: meta.upstreamProvider,
-								model: meta.upstreamModel ?? downstreamModel,
-								status: "ok",
-								httpStatus: response.status,
-								latencyMs: attemptLatencyMs,
-								upstreamRequestId: attemptUpstreamRequestId,
-								startedAt: meta.attemptStartedAt,
-								endedAt: new Date().toISOString(),
-							});
-							selectedChannel = meta.channel;
-							selectedUpstreamProvider = meta.upstreamProvider;
-							try {
-								selectedUpstreamEndpoint = detectEndpointType(
-									meta.upstreamProvider,
-									responsePath,
-								);
-							} catch {
-								selectedUpstreamEndpoint = endpointType;
-							}
-							selectedUpstreamModel = meta.upstreamModel;
-							selectedResponse = response;
-							selectedRequestPath = responsePath;
-							selectedImmediateUsage = immediateUsage;
-							selectedHasUsageHeaders = hasUsageHeaderSignal;
-							lastErrorDetails = null;
-							if (meta.recordModel) {
-								scheduleUsageEvent({
-									type: "capability_upsert",
-									payload: {
-										channelId: meta.channel.id,
-										models: [meta.recordModel],
-										nowSeconds,
-									},
+								recordAttemptLog({
+									attemptIndex: attemptNumber,
+									channelId: meta.channel.id,
+									provider: meta.upstreamProvider,
+									model: meta.upstreamModel ?? downstreamModel,
+									status: "error",
+									errorClass: "usage_finalize",
+									errorCode: USAGE_ZERO_COMPLETION_TOKENS_ERROR_CODE,
+									httpStatus: response.status,
+									latencyMs: attemptLatencyMs,
+									upstreamRequestId: attemptUpstreamRequestId,
+									startedAt: meta.attemptStartedAt,
+									endedAt: new Date().toISOString(),
 								});
+								appendAttemptFailure({
+									attemptIndex: attemptNumber,
+									channel: meta.channel,
+									httpStatus: response.status,
+									errorCode: USAGE_ZERO_COMPLETION_TOKENS_ERROR_CODE,
+									errorMessage: zeroCompletionMessage,
+									latencyMs: attemptLatencyMs,
+								});
+								if (
+									!(await continueAfterFailure(
+										USAGE_ZERO_COMPLETION_TOKENS_ERROR_CODE,
+										zeroCompletionMessage,
+										attemptNumber,
+									))
+								) {
+									dispatchStopRetry = true;
+								}
+							} else {
+								if (!isStream) {
+									recordAttemptUsage({
+										channelId: meta.channel.id,
+										requestPath: responsePath,
+										latencyMs: attemptLatencyMs,
+										firstTokenLatencyMs: attemptLatencyMs,
+										usage: immediateUsage,
+										status: "ok",
+										upstreamStatus: response.status,
+										failureStage: "usage_finalize",
+										usageSource: immediateUsageSource,
+									});
+								}
+								recordAttemptLog({
+									attemptIndex: attemptNumber,
+									channelId: meta.channel.id,
+									provider: meta.upstreamProvider,
+									model: meta.upstreamModel ?? downstreamModel,
+									status: "ok",
+									httpStatus: response.status,
+									latencyMs: attemptLatencyMs,
+									upstreamRequestId: attemptUpstreamRequestId,
+									startedAt: meta.attemptStartedAt,
+									endedAt: new Date().toISOString(),
+								});
+								selectedChannel = meta.channel;
+								selectedUpstreamProvider = meta.upstreamProvider;
+								try {
+									selectedUpstreamEndpoint = detectEndpointType(
+										meta.upstreamProvider,
+										responsePath,
+									);
+								} catch {
+									selectedUpstreamEndpoint = endpointType;
+								}
+								selectedUpstreamModel = meta.upstreamModel;
+								selectedResponse = response;
+								selectedRequestPath = responsePath;
+								selectedImmediateUsage = immediateUsage;
+								selectedHasUsageHeaders = hasUsageHeaderSignal;
+								lastErrorDetails = null;
+								if (meta.recordModel) {
+									scheduleUsageEvent({
+										type: "capability_upsert",
+										payload: {
+											channelId: meta.channel.id,
+											models: [meta.recordModel],
+											nowSeconds,
+										},
+									});
+								}
 							}
 						}
 					} else {
@@ -3356,35 +3523,18 @@ proxy.all("/*", tokenAuth, async (c) => {
 							errorMessage: normalizedErrorMessage,
 							latencyMs: attemptLatencyMs,
 						});
-						const cooldownEligible = shouldCooldown(
-							response.status,
-							finalErrorCode,
-						);
-						if (meta.recordModel && cooldownSeconds > 0 && cooldownEligible) {
-							scheduleUsageEvent({
-								type: "model_error",
-								payload: {
-									channelId: meta.channel.id,
-									model: meta.recordModel,
-									errorCode: String(response.status),
-									nowSeconds,
-								},
-							});
-						}
-						if (
-							downstreamModel &&
-							downstreamModel !== meta.recordModel &&
-							cooldownSeconds > 0 &&
-							cooldownEligible
-						) {
-							scheduleUsageEvent({
-								type: "model_error",
-								payload: {
-									channelId: meta.channel.id,
-									model: downstreamModel,
-									errorCode: String(response.status),
-									nowSeconds,
-								},
+						scheduleModelError({
+							channelId: meta.channel.id,
+							model: meta.recordModel,
+							upstreamStatus: response.status,
+							errorCode: finalErrorCode,
+						});
+						if (downstreamModel && downstreamModel !== meta.recordModel) {
+							scheduleModelError({
+								channelId: meta.channel.id,
+								model: downstreamModel,
+								upstreamStatus: response.status,
+								errorCode: finalErrorCode,
 							});
 						}
 					}
@@ -3784,6 +3934,76 @@ proxy.all("/*", tokenAuth, async (c) => {
 						: headerUsage
 							? "header"
 							: "none";
+					const abnormalSuccess = await detectAbnormalSuccessResponse(response);
+					if (abnormalSuccess) {
+						lastErrorDetails = {
+							upstreamStatus: response.status,
+							errorCode: abnormalSuccess.errorCode,
+							errorMessage: abnormalSuccess.errorMessage,
+							errorMetaJson: abnormalSuccess.errorMetaJson,
+						};
+						recordAttemptUsage({
+							channelId: channel.id,
+							requestPath: responsePath,
+							latencyMs: attemptLatencyMs,
+							firstTokenLatencyMs: isStream ? null : attemptLatencyMs,
+							usage: null,
+							status: "error",
+							upstreamStatus: response.status,
+							errorCode: abnormalSuccess.errorCode,
+							errorMessage: abnormalSuccess.errorMessage,
+							failureStage: "upstream_response",
+							failureReason: abnormalSuccess.errorCode,
+							usageSource: "none",
+							errorMetaJson: abnormalSuccess.errorMetaJson,
+						});
+						recordAttemptLog({
+							attemptIndex: attemptNumber,
+							channelId: channel.id,
+							provider: upstreamProvider,
+							model: upstreamModel ?? downstreamModel,
+							status: "error",
+							errorClass: "upstream_response",
+							errorCode: abnormalSuccess.errorCode,
+							httpStatus: response.status,
+							latencyMs: attemptLatencyMs,
+							upstreamRequestId: attemptUpstreamRequestId,
+							startedAt: attemptStartedAt,
+							endedAt: new Date().toISOString(),
+						});
+						appendAttemptFailure({
+							attemptIndex: attemptNumber,
+							channel,
+							httpStatus: response.status,
+							errorCode: abnormalSuccess.errorCode,
+							errorMessage: abnormalSuccess.errorMessage,
+							latencyMs: attemptLatencyMs,
+						});
+						scheduleModelError({
+							channelId: channel.id,
+							model: recordModel,
+							upstreamStatus: response.status,
+							errorCode: abnormalSuccess.errorCode,
+						});
+						if (downstreamModel && downstreamModel !== recordModel) {
+							scheduleModelError({
+								channelId: channel.id,
+								model: downstreamModel,
+								upstreamStatus: response.status,
+								errorCode: abnormalSuccess.errorCode,
+							});
+						}
+						if (
+							!(await continueAfterFailure(
+								abnormalSuccess.errorCode,
+								abnormalSuccess.errorMessage,
+								attemptNumber,
+							))
+						) {
+							break;
+						}
+						continue;
+					}
 					const hasAnyUsageSignal = hasUsageHeaderSignal || hasUsageJsonSignal;
 					const failOnMissingUsage = shouldTreatMissingUsageAsError({
 						isStream,
@@ -4034,35 +4254,18 @@ proxy.all("/*", tokenAuth, async (c) => {
 					latencyMs: attemptLatencyMs,
 				});
 
-				const cooldownEligible = shouldCooldown(
-					response.status,
-					finalErrorCode,
-				);
-				if (recordModel && cooldownSeconds > 0 && cooldownEligible) {
-					scheduleUsageEvent({
-						type: "model_error",
-						payload: {
-							channelId: channel.id,
-							model: recordModel,
-							errorCode: String(response.status),
-							nowSeconds,
-						},
-					});
-				}
-				if (
-					downstreamModel &&
-					downstreamModel !== recordModel &&
-					cooldownSeconds > 0 &&
-					cooldownEligible
-				) {
-					scheduleUsageEvent({
-						type: "model_error",
-						payload: {
-							channelId: channel.id,
-							model: downstreamModel,
-							errorCode: String(response.status),
-							nowSeconds,
-						},
+				scheduleModelError({
+					channelId: channel.id,
+					model: recordModel,
+					upstreamStatus: response.status,
+					errorCode: finalErrorCode,
+				});
+				if (downstreamModel && downstreamModel !== recordModel) {
+					scheduleModelError({
+						channelId: channel.id,
+						model: downstreamModel,
+						upstreamStatus: response.status,
+						errorCode: finalErrorCode,
 					});
 				}
 				if (
@@ -4137,32 +4340,18 @@ proxy.all("/*", tokenAuth, async (c) => {
 					latencyMs: attemptLatencyMs,
 				});
 
-				const cooldownEligible = shouldCooldown(null, usageErrorCode);
-				if (recordModel && cooldownSeconds > 0 && cooldownEligible) {
-					scheduleUsageEvent({
-						type: "model_error",
-						payload: {
-							channelId: channel.id,
-							model: recordModel,
-							errorCode: usageErrorCode,
-							nowSeconds,
-						},
-					});
-				}
-				if (
-					downstreamModel &&
-					downstreamModel !== recordModel &&
-					cooldownSeconds > 0 &&
-					cooldownEligible
-				) {
-					scheduleUsageEvent({
-						type: "model_error",
-						payload: {
-							channelId: channel.id,
-							model: downstreamModel,
-							errorCode: usageErrorCode,
-							nowSeconds,
-						},
+				scheduleModelError({
+					channelId: channel.id,
+					model: recordModel,
+					upstreamStatus: null,
+					errorCode: usageErrorCode,
+				});
+				if (downstreamModel && downstreamModel !== recordModel) {
+					scheduleModelError({
+						channelId: channel.id,
+						model: downstreamModel,
+						upstreamStatus: null,
+						errorCode: usageErrorCode,
 					});
 				}
 				if (

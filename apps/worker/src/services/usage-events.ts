@@ -26,6 +26,9 @@ export type UsageEvent =
 				channelId: string;
 				model: string | null;
 				errorCode: string;
+				cooldownSeconds: number;
+				cooldownFailureThreshold: number;
+				cooldownDisableThreshold: number;
 				nowSeconds?: number;
 			};
 	  }
@@ -41,13 +44,17 @@ function resolveNowSeconds(value?: number): number {
 	return Math.floor(Date.now() / 1000);
 }
 
+export type UsageEventProcessResult = {
+	channelDisabled: boolean;
+};
+
 export async function processUsageEvent(
 	db: D1Database,
 	event: UsageEvent,
-): Promise<void> {
+): Promise<UsageEventProcessResult> {
 	if (event.type === "usage") {
 		await recordUsage(db, event.payload);
-		return;
+		return { channelDisabled: false };
 	}
 	if (event.type === "capability_upsert") {
 		const nowSeconds = resolveNowSeconds(event.payload.nowSeconds);
@@ -57,20 +64,28 @@ export async function processUsageEvent(
 			event.payload.models,
 			nowSeconds,
 		);
-		return;
+		return { channelDisabled: false };
 	}
 	if (event.type === "model_error") {
 		const nowSeconds = resolveNowSeconds(event.payload.nowSeconds);
-		await recordChannelModelError(
+		const result = await recordChannelModelError(
 			db,
 			event.payload.channelId,
 			event.payload.model,
 			event.payload.errorCode,
+			{
+				cooldownSeconds: event.payload.cooldownSeconds,
+				cooldownFailureThreshold: event.payload.cooldownFailureThreshold,
+				cooldownDisableThreshold: event.payload.cooldownDisableThreshold,
+			},
 			nowSeconds,
 		);
-		return;
+		return {
+			channelDisabled: result.channelDisabled,
+		};
 	}
 	if (event.type === "attempt_log") {
 		await insertAttemptEvent(db, event.payload);
 	}
+	return { channelDisabled: false };
 }

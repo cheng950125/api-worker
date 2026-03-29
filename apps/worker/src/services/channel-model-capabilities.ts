@@ -8,7 +8,52 @@ export type CapabilityRow = {
 	model: string;
 	last_ok_at: number | null;
 	last_err_count?: number | null;
+	cooldown_count?: number | null;
 };
+
+type ChannelModelCooldownState = {
+	lastOkAt: number;
+	lastErrAt: number;
+	lastErrCount: number;
+};
+
+type RecordModelErrorOptions = {
+	cooldownSeconds: number;
+	cooldownFailureThreshold: number;
+	cooldownDisableThreshold: number;
+};
+
+export type RecordModelErrorResult = {
+	cooldownEntered: boolean;
+	cooldownCount: number;
+	channelDisabled: boolean;
+};
+
+function toSafeInt(value: unknown): number {
+	const parsed = Number(value ?? 0);
+	if (!Number.isFinite(parsed)) {
+		return 0;
+	}
+	return Math.max(0, Math.floor(parsed));
+}
+
+function isCoolingDown(
+	state: ChannelModelCooldownState,
+	nowSeconds: number,
+	cooldownSeconds: number,
+	cooldownFailureThreshold: number,
+): boolean {
+	if (cooldownSeconds <= 0) {
+		return false;
+	}
+	const cutoff = nowSeconds - cooldownSeconds;
+	return (
+		state.lastErrAt > 0 &&
+		state.lastErrAt >= cutoff &&
+		state.lastErrAt >= state.lastOkAt &&
+		state.lastErrCount >= cooldownFailureThreshold
+	);
+}
 
 export function buildCapabilityMap(
 	rows: CapabilityRow[],
@@ -150,18 +195,110 @@ export async function recordChannelModelError(
 	channelId: string,
 	model: string | null,
 	errorCode: string,
+	options: RecordModelErrorOptions,
 	nowSeconds: number = Math.floor(Date.now() / 1000),
-): Promise<void> {
+): Promise<RecordModelErrorResult> {
 	if (!model) {
-		return;
+		return {
+			cooldownEntered: false,
+			cooldownCount: 0,
+			channelDisabled: false,
+		};
 	}
+	const cooldownSeconds = Math.max(0, Math.floor(options.cooldownSeconds));
+	const cooldownFailureThreshold = Math.max(
+		1,
+		Math.floor(options.cooldownFailureThreshold),
+	);
+	const cooldownDisableThreshold = Math.max(
+		1,
+		Math.floor(options.cooldownDisableThreshold),
+	);
 	const timestamp = nowIso();
-	await db
+	const row = await db
 		.prepare(
-			"INSERT INTO channel_model_capabilities (channel_id, model, last_ok_at, last_err_at, last_err_code, last_err_count, created_at, updated_at) VALUES (?, ?, 0, ?, ?, 1, ?, ?) ON CONFLICT(channel_id, model) DO UPDATE SET last_err_at = excluded.last_err_at, last_err_code = excluded.last_err_code, last_err_count = COALESCE(channel_model_capabilities.last_err_count, 0) + 1, updated_at = excluded.updated_at",
+			"SELECT last_ok_at, last_err_at, last_err_count, cooldown_count FROM channel_model_capabilities WHERE channel_id = ? AND model = ?",
 		)
-		.bind(channelId, model, nowSeconds, errorCode, timestamp, timestamp)
-		.run();
+		.bind(channelId, model)
+		.first<{
+			last_ok_at: number | null;
+			last_err_at: number | null;
+			last_err_count: number | null;
+			cooldown_count?: number | null;
+		}>();
+	const lastOkAt = toSafeInt(row?.last_ok_at);
+	const lastErrAt = toSafeInt(row?.last_err_at);
+	const lastErrCount = toSafeInt(row?.last_err_count);
+	const cooldownCount = toSafeInt(row?.cooldown_count);
+	const wasCooling = isCoolingDown(
+		{
+			lastOkAt,
+			lastErrAt,
+			lastErrCount,
+		},
+		nowSeconds,
+		cooldownSeconds,
+		cooldownFailureThreshold,
+	);
+	const nextErrCount = row ? lastErrCount + 1 : 1;
+	const isCoolingNow = isCoolingDown(
+		{
+			lastOkAt,
+			lastErrAt: nowSeconds,
+			lastErrCount: nextErrCount,
+		},
+		nowSeconds,
+		cooldownSeconds,
+		cooldownFailureThreshold,
+	);
+	const cooldownEntered = !wasCooling && isCoolingNow;
+	const nextCooldownCount = cooldownEntered ? cooldownCount + 1 : cooldownCount;
+	if (row) {
+		await db
+			.prepare(
+				"UPDATE channel_model_capabilities SET last_err_at = ?, last_err_code = ?, last_err_count = ?, cooldown_count = ?, updated_at = ? WHERE channel_id = ? AND model = ?",
+			)
+			.bind(
+				nowSeconds,
+				errorCode,
+				nextErrCount,
+				nextCooldownCount,
+				timestamp,
+				channelId,
+				model,
+			)
+			.run();
+	} else {
+		await db
+			.prepare(
+				"INSERT INTO channel_model_capabilities (channel_id, model, last_ok_at, last_err_at, last_err_code, last_err_count, cooldown_count, created_at, updated_at) VALUES (?, ?, 0, ?, ?, 1, ?, ?, ?)",
+			)
+			.bind(
+				channelId,
+				model,
+				nowSeconds,
+				errorCode,
+				nextCooldownCount,
+				timestamp,
+				timestamp,
+			)
+			.run();
+	}
+	let channelDisabled = false;
+	if (cooldownEntered && nextCooldownCount >= cooldownDisableThreshold) {
+		const disableResult = await db
+			.prepare(
+				"UPDATE channels SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
+			)
+			.bind("disabled", timestamp, channelId, "active")
+			.run();
+		channelDisabled = Number(disableResult.meta?.changes ?? 0) > 0;
+	}
+	return {
+		cooldownEntered,
+		cooldownCount: nextCooldownCount,
+		channelDisabled,
+	};
 }
 
 export async function upsertChannelModelCapabilities(
@@ -175,7 +312,7 @@ export async function upsertChannelModelCapabilities(
 	}
 	const timestamp = nowIso();
 	const stmt = db.prepare(
-		"INSERT INTO channel_model_capabilities (channel_id, model, last_ok_at, last_err_at, last_err_code, last_err_count, created_at, updated_at) VALUES (?, ?, ?, NULL, NULL, 0, ?, ?) ON CONFLICT(channel_id, model) DO UPDATE SET last_ok_at = excluded.last_ok_at, last_err_at = NULL, last_err_code = NULL, last_err_count = 0, updated_at = excluded.updated_at",
+		"INSERT INTO channel_model_capabilities (channel_id, model, last_ok_at, last_err_at, last_err_code, last_err_count, cooldown_count, created_at, updated_at) VALUES (?, ?, ?, NULL, NULL, 0, 0, ?, ?) ON CONFLICT(channel_id, model) DO UPDATE SET last_ok_at = excluded.last_ok_at, last_err_at = NULL, last_err_code = NULL, last_err_count = 0, cooldown_count = 0, updated_at = excluded.updated_at",
 	);
 	const statements = models.map((model) =>
 		stmt.bind(channelId, model, nowSeconds, timestamp, timestamp),

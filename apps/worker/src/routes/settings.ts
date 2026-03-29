@@ -44,6 +44,8 @@ settings.get("/", async (c) => {
 			runtimeSettings.model_failure_cooldown_minutes,
 		proxy_model_failure_cooldown_threshold:
 			runtimeSettings.model_failure_cooldown_threshold,
+		proxy_model_failure_auto_disable_threshold:
+			runtimeSettings.model_failure_auto_disable_threshold,
 		runtime_config: runtimeConfig,
 		runtime_settings: runtimeSettings,
 	});
@@ -73,6 +75,7 @@ settings.put("/", async (c) => {
 		zero_completion_as_error_enabled?: boolean;
 		model_failure_cooldown_minutes?: number;
 		model_failure_cooldown_threshold?: number;
+		model_failure_auto_disable_threshold?: number;
 		stream_usage_mode?: string;
 		stream_usage_max_bytes?: number;
 		stream_usage_max_parsers?: number;
@@ -248,6 +251,24 @@ settings.put("/", async (c) => {
 			);
 		}
 		runtimePatch.model_failure_cooldown_threshold = threshold;
+		runtimeTouched = true;
+	}
+
+	if (body.proxy_model_failure_auto_disable_threshold !== undefined) {
+		const threshold = Number(body.proxy_model_failure_auto_disable_threshold);
+		if (
+			Number.isNaN(threshold) ||
+			threshold < 1 ||
+			!Number.isInteger(threshold)
+		) {
+			return jsonError(
+				c,
+				400,
+				"invalid_proxy_model_failure_auto_disable_threshold",
+				"invalid_proxy_model_failure_auto_disable_threshold",
+			);
+		}
+		runtimePatch.model_failure_auto_disable_threshold = threshold;
 		runtimeTouched = true;
 	}
 

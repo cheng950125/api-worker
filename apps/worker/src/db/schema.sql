@@ -144,6 +144,7 @@ CREATE TABLE IF NOT EXISTS channel_model_capabilities (
   last_err_at INTEGER,
   last_err_code TEXT,
   last_err_count INTEGER NOT NULL DEFAULT 0,
+  cooldown_count INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   PRIMARY KEY (channel_id, model)

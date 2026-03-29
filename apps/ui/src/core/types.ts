@@ -127,6 +127,7 @@ export type Settings = {
 	checkin_schedule_time?: string;
 	proxy_model_failure_cooldown_minutes?: number;
 	proxy_model_failure_cooldown_threshold?: number;
+	proxy_model_failure_auto_disable_threshold?: number;
 	runtime_settings?: RuntimeProxySettings;
 	runtime_config?: RuntimeProxyConfig;
 };
@@ -140,6 +141,7 @@ export type RuntimeProxySettings = {
 	zero_completion_as_error_enabled: boolean;
 	model_failure_cooldown_minutes: number;
 	model_failure_cooldown_threshold: number;
+	model_failure_auto_disable_threshold: number;
 	stream_usage_mode: string;
 	stream_usage_max_bytes: number;
 	stream_usage_max_parsers: number;
@@ -214,6 +216,7 @@ export type SettingsForm = {
 	checkin_schedule_time: string;
 	proxy_model_failure_cooldown_minutes: string;
 	proxy_model_failure_cooldown_threshold: string;
+	proxy_model_failure_auto_disable_threshold: string;
 	proxy_upstream_timeout_ms: string;
 	proxy_retry_max_retries: string;
 	proxy_retry_sleep_ms: string;

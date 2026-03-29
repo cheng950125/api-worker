@@ -333,11 +333,10 @@ export const SettingsView = ({
 									class="app-settings-row__label"
 									for="proxy-model-failure-cooldown"
 								>
-									失败冷却时长（分钟）
+									冷却窗口时长（分钟）
 								</label>
 								<p class="app-settings-row__hint">
-									同一模型连续失败达到阈值后，在该时长内跳过对应渠道；0
-									表示关闭冷却
+									进入冷却窗口后，在该时长内跳过对应渠道；0 表示关闭冷却窗口
 								</p>
 							</div>
 							<Input
@@ -361,10 +360,10 @@ export const SettingsView = ({
 									class="app-settings-row__label"
 									for="proxy-model-failure-threshold"
 								>
-									连续失败次数阈值
+									进入冷却阈值（连续失败次数）
 								</label>
 								<p class="app-settings-row__hint">
-									达到该次数才进入冷却，最小为 1
+									同一模型连续失败达到该次数才进入冷却窗口，最小为 1
 								</p>
 							</div>
 							<Input
@@ -382,6 +381,44 @@ export const SettingsView = ({
 									});
 								}}
 							/>
+						</div>
+						<div class="app-settings-row">
+							<div class="app-settings-row__main">
+								<label
+									class="app-settings-row__label"
+									for="proxy-model-failure-auto-disable-threshold"
+								>
+									自动禁用阈值（按冷却次数）
+								</label>
+								<p class="app-settings-row__hint">
+									每次进入冷却窗口计数 +1；达到该次数后自动禁用渠道，最小为 1
+								</p>
+							</div>
+							<Input
+								class="app-settings-row__control app-settings-row__control--compact"
+								id="proxy-model-failure-auto-disable-threshold"
+								name="proxy_model_failure_auto_disable_threshold"
+								type="number"
+								min="1"
+								step="1"
+								value={settingsForm.proxy_model_failure_auto_disable_threshold}
+								onInput={(event) => {
+									const target = event.currentTarget as HTMLInputElement | null;
+									onFormChange({
+										proxy_model_failure_auto_disable_threshold:
+											target?.value ?? "",
+									});
+								}}
+							/>
+						</div>
+						<div class="app-settings-row app-settings-row--stack">
+							<div class="app-settings-row__main">
+								<span class="app-settings-row__label">策略说明</span>
+								<p class="app-settings-row__hint">
+									触发顺序：连续失败达到阈值 → 进入冷却窗口 → 冷却次数累计 →
+									达到自动禁用阈值后禁用渠道
+								</p>
+							</div>
 						</div>
 						<div class="app-settings-row">
 							<div class="app-settings-row__main">

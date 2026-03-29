@@ -5,8 +5,9 @@ import { nowIso } from "../utils/time";
 const DEFAULT_LOG_RETENTION_DAYS = 30;
 const DEFAULT_SESSION_TTL_HOURS = 12;
 const DEFAULT_CHECKIN_SCHEDULE_TIME = "00:10";
-const DEFAULT_MODEL_FAILURE_COOLDOWN_MINUTES = 60;
+const DEFAULT_MODEL_FAILURE_COOLDOWN_MINUTES = 720;
 const DEFAULT_MODEL_FAILURE_COOLDOWN_THRESHOLD = 3;
+const DEFAULT_MODEL_FAILURE_AUTO_DISABLE_THRESHOLD = 3;
 const DEFAULT_PROXY_STREAM_USAGE_MODE = "full";
 const DEFAULT_PROXY_STREAM_USAGE_MAX_BYTES = 0;
 const DEFAULT_PROXY_STREAM_USAGE_MAX_PARSERS = 0;
@@ -15,7 +16,7 @@ const DEFAULT_PROXY_RESPONSES_AFFINITY_TTL_SECONDS = 24 * 60 * 60;
 const DEFAULT_PROXY_STREAM_OPTIONS_CAPABILITY_TTL_SECONDS = 7 * 24 * 60 * 60;
 const DEFAULT_PROXY_UPSTREAM_TIMEOUT_MS = 180000;
 const DEFAULT_PROXY_RETRY_MAX_RETRIES = 5;
-const DEFAULT_PROXY_RETRY_SLEEP_MS = 1000;
+const DEFAULT_PROXY_RETRY_SLEEP_MS = 500;
 const DEFAULT_PROXY_RETRY_SKIP_ERROR_CODES: string[] = [];
 const DEFAULT_PROXY_RETRY_SLEEP_ERROR_CODES = [
 	"system_cpu_overloaded",
@@ -36,6 +37,8 @@ const ADMIN_PASSWORD_HASH_KEY = "admin_password_hash";
 const CHECKIN_SCHEDULE_TIME_KEY = "checkin_schedule_time";
 const MODEL_FAILURE_COOLDOWN_KEY = "model_failure_cooldown_minutes";
 const MODEL_FAILURE_COOLDOWN_THRESHOLD_KEY = "model_failure_cooldown_threshold";
+const MODEL_FAILURE_AUTO_DISABLE_THRESHOLD_KEY =
+	"model_failure_auto_disable_threshold";
 const PROXY_UPSTREAM_TIMEOUT_KEY = "proxy_upstream_timeout_ms";
 const PROXY_RETRY_MAX_RETRIES_KEY = "proxy_retry_max_retries";
 const PROXY_RETRY_SLEEP_MS_KEY = "proxy_retry_sleep_ms";
@@ -69,6 +72,7 @@ const RUNTIME_SETTING_KEYS = [
 	PROXY_ZERO_COMPLETION_AS_ERROR_KEY,
 	MODEL_FAILURE_COOLDOWN_KEY,
 	MODEL_FAILURE_COOLDOWN_THRESHOLD_KEY,
+	MODEL_FAILURE_AUTO_DISABLE_THRESHOLD_KEY,
 	PROXY_STREAM_USAGE_MODE_KEY,
 	PROXY_STREAM_USAGE_MAX_BYTES_KEY,
 	PROXY_STREAM_USAGE_MAX_PARSERS_KEY,
@@ -91,6 +95,7 @@ export type RuntimeProxyConfig = {
 	zero_completion_as_error_enabled: boolean;
 	model_failure_cooldown_minutes: number;
 	model_failure_cooldown_threshold: number;
+	model_failure_auto_disable_threshold: number;
 	stream_usage_mode: string;
 	stream_usage_max_bytes: number;
 	stream_usage_max_parsers: number;
@@ -112,6 +117,7 @@ export type ProxyRuntimeSettings = {
 	zero_completion_as_error_enabled: boolean;
 	model_failure_cooldown_minutes: number;
 	model_failure_cooldown_threshold: number;
+	model_failure_auto_disable_threshold: number;
 	stream_usage_mode: string;
 	stream_usage_max_bytes: number;
 	stream_usage_max_parsers: number;
@@ -335,6 +341,10 @@ export async function getProxyRuntimeSettings(
 			settings[MODEL_FAILURE_COOLDOWN_THRESHOLD_KEY] ?? null,
 			DEFAULT_MODEL_FAILURE_COOLDOWN_THRESHOLD,
 		),
+		model_failure_auto_disable_threshold: parsePositiveSetting(
+			settings[MODEL_FAILURE_AUTO_DISABLE_THRESHOLD_KEY] ?? null,
+			DEFAULT_MODEL_FAILURE_AUTO_DISABLE_THRESHOLD,
+		),
 		stream_usage_mode: normalizeStreamUsageMode(
 			settings[PROXY_STREAM_USAGE_MODE_KEY],
 		),
@@ -481,6 +491,17 @@ export async function setProxyRuntimeSettings(
 				MODEL_FAILURE_COOLDOWN_THRESHOLD_KEY,
 				String(
 					Math.max(1, Math.floor(update.model_failure_cooldown_threshold)),
+				),
+			),
+		);
+	}
+	if (update.model_failure_auto_disable_threshold !== undefined) {
+		tasks.push(
+			upsertSetting(
+				db,
+				MODEL_FAILURE_AUTO_DISABLE_THRESHOLD_KEY,
+				String(
+					Math.max(1, Math.floor(update.model_failure_auto_disable_threshold)),
 				),
 			),
 		);

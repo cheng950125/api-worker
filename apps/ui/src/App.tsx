@@ -699,16 +699,19 @@ const App = () => {
 			admin_password: "",
 			checkin_schedule_time: data.settings.checkin_schedule_time ?? "00:10",
 			proxy_model_failure_cooldown_minutes: String(
-				runtimeSettings?.model_failure_cooldown_minutes ?? 60,
+				runtimeSettings?.model_failure_cooldown_minutes ?? 720,
 			),
 			proxy_model_failure_cooldown_threshold: String(
 				runtimeSettings?.model_failure_cooldown_threshold ?? 3,
+			),
+			proxy_model_failure_auto_disable_threshold: String(
+				runtimeSettings?.model_failure_auto_disable_threshold ?? 3,
 			),
 			proxy_upstream_timeout_ms: String(
 				runtimeSettings?.upstream_timeout_ms ?? 180000,
 			),
 			proxy_retry_max_retries: String(runtimeSettings?.retry_max_retries ?? 5),
-			proxy_retry_sleep_ms: String(runtimeSettings?.retry_sleep_ms ?? 1000),
+			proxy_retry_sleep_ms: String(runtimeSettings?.retry_sleep_ms ?? 500),
 			proxy_retry_skip_error_codes:
 				runtimeSettings?.retry_skip_error_codes ?? [],
 			proxy_retry_sleep_error_codes:
@@ -1365,6 +1368,9 @@ const App = () => {
 			const failureCooldownThreshold = Number(
 				settingsForm.proxy_model_failure_cooldown_threshold,
 			);
+			const failureAutoDisableThreshold = Number(
+				settingsForm.proxy_model_failure_auto_disable_threshold,
+			);
 			const upstreamTimeoutMs = Number(settingsForm.proxy_upstream_timeout_ms);
 			const retryMaxRetries = Number(settingsForm.proxy_retry_max_retries);
 			const retrySleepMs = Number(settingsForm.proxy_retry_sleep_ms);
@@ -1424,6 +1430,14 @@ const App = () => {
 				!Number.isInteger(failureCooldownThreshold)
 			) {
 				pushNotice("warning", "连续失败次数阈值需为正整数");
+				return;
+			}
+			if (
+				Number.isNaN(failureAutoDisableThreshold) ||
+				failureAutoDisableThreshold < 1 ||
+				!Number.isInteger(failureAutoDisableThreshold)
+			) {
+				pushNotice("warning", "自动禁用阈值（按冷却次数）需为正整数");
 				return;
 			}
 			if (Number.isNaN(upstreamTimeoutMs) || upstreamTimeoutMs < 0) {
@@ -1505,6 +1519,7 @@ const App = () => {
 					settingsForm.checkin_schedule_time.trim() || "00:10",
 				proxy_model_failure_cooldown_minutes: failureCooldownMinutes,
 				proxy_model_failure_cooldown_threshold: failureCooldownThreshold,
+				proxy_model_failure_auto_disable_threshold: failureAutoDisableThreshold,
 				proxy_upstream_timeout_ms: upstreamTimeoutMs,
 				proxy_retry_max_retries: retryMaxRetries,
 				proxy_retry_sleep_ms: retrySleepMs,
