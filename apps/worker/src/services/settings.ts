@@ -1,10 +1,12 @@
 import type { D1Database } from "@cloudflare/workers-types";
 import type { Bindings } from "../env";
-import { nowIso } from "../utils/time";
+import { nowIso, parseScheduleTime } from "../utils/time";
 
 const DEFAULT_LOG_RETENTION_DAYS = 30;
 const DEFAULT_SESSION_TTL_HOURS = 12;
 const DEFAULT_CHECKIN_SCHEDULE_TIME = "00:10";
+const DEFAULT_CHANNEL_RECOVERY_PROBE_ENABLED = false;
+const DEFAULT_CHANNEL_RECOVERY_PROBE_SCHEDULE_TIME = "03:10";
 const DEFAULT_MODEL_FAILURE_COOLDOWN_MINUTES = 720;
 const DEFAULT_MODEL_FAILURE_COOLDOWN_THRESHOLD = 3;
 const DEFAULT_MODEL_FAILURE_AUTO_DISABLE_THRESHOLD = 3;
@@ -35,6 +37,9 @@ const RETENTION_KEY = "log_retention_days";
 const SESSION_TTL_KEY = "session_ttl_hours";
 const ADMIN_PASSWORD_HASH_KEY = "admin_password_hash";
 const CHECKIN_SCHEDULE_TIME_KEY = "checkin_schedule_time";
+const CHANNEL_RECOVERY_PROBE_ENABLED_KEY = "channel_recovery_probe_enabled";
+const CHANNEL_RECOVERY_PROBE_SCHEDULE_TIME_KEY =
+	"channel_recovery_probe_schedule_time";
 const MODEL_FAILURE_COOLDOWN_KEY = "model_failure_cooldown_minutes";
 const MODEL_FAILURE_COOLDOWN_THRESHOLD_KEY = "model_failure_cooldown_threshold";
 const MODEL_FAILURE_AUTO_DISABLE_THRESHOLD_KEY =
@@ -140,6 +145,8 @@ let retentionSnapshot: SettingSnapshot<number> | null = null;
 let sessionTtlSnapshot: SettingSnapshot<number> | null = null;
 let adminPasswordSnapshot: SettingSnapshot<string | null> | null = null;
 let checkinScheduleSnapshot: SettingSnapshot<string> | null = null;
+let channelRecoveryProbeEnabledSnapshot: SettingSnapshot<boolean> | null = null;
+let channelRecoveryProbeScheduleSnapshot: SettingSnapshot<string> | null = null;
 let modelCooldownSnapshot: SettingSnapshot<number> | null = null;
 let runtimeSettingsSnapshot: SettingSnapshot<ProxyRuntimeSettings> | null =
 	null;
@@ -730,6 +737,62 @@ export async function setCheckinScheduleTime(
 	checkinScheduleSnapshot = null;
 }
 
+export async function getChannelRecoveryProbeEnabled(
+	db: D1Database,
+): Promise<boolean> {
+	return getCachedSetting(
+		channelRecoveryProbeEnabledSnapshot,
+		async () => {
+			const raw = await readSetting(db, CHANNEL_RECOVERY_PROBE_ENABLED_KEY);
+			return parseBooleanSetting(raw, DEFAULT_CHANNEL_RECOVERY_PROBE_ENABLED);
+		},
+		(next) => {
+			channelRecoveryProbeEnabledSnapshot = next;
+		},
+	);
+}
+
+export async function setChannelRecoveryProbeEnabled(
+	db: D1Database,
+	enabled: boolean,
+): Promise<void> {
+	await upsertSetting(
+		db,
+		CHANNEL_RECOVERY_PROBE_ENABLED_KEY,
+		enabled ? "1" : "0",
+	);
+	channelRecoveryProbeEnabledSnapshot = null;
+}
+
+export async function getChannelRecoveryProbeScheduleTime(
+	db: D1Database,
+): Promise<string> {
+	return getCachedSetting(
+		channelRecoveryProbeScheduleSnapshot,
+		async () => {
+			const raw = await readSetting(
+				db,
+				CHANNEL_RECOVERY_PROBE_SCHEDULE_TIME_KEY,
+			);
+			if (raw && parseScheduleTime(raw)) {
+				return raw;
+			}
+			return DEFAULT_CHANNEL_RECOVERY_PROBE_SCHEDULE_TIME;
+		},
+		(next) => {
+			channelRecoveryProbeScheduleSnapshot = next;
+		},
+	);
+}
+
+export async function setChannelRecoveryProbeScheduleTime(
+	db: D1Database,
+	time: string,
+): Promise<void> {
+	await upsertSetting(db, CHANNEL_RECOVERY_PROBE_SCHEDULE_TIME_KEY, time);
+	channelRecoveryProbeScheduleSnapshot = null;
+}
+
 export async function getModelFailureCooldownMinutes(
 	db: D1Database,
 ): Promise<number> {
@@ -773,6 +836,8 @@ export function resetSettingsSnapshots(): void {
 	sessionTtlSnapshot = null;
 	adminPasswordSnapshot = null;
 	checkinScheduleSnapshot = null;
+	channelRecoveryProbeEnabledSnapshot = null;
+	channelRecoveryProbeScheduleSnapshot = null;
 	modelCooldownSnapshot = null;
 	runtimeSettingsSnapshot = null;
 }

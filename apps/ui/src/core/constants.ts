@@ -50,6 +50,8 @@ export const initialSettingsForm: SettingsForm = {
 	session_ttl_hours: "12",
 	admin_password: "",
 	checkin_schedule_time: "00:10",
+	channel_recovery_probe_enabled: false,
+	channel_recovery_probe_schedule_time: "03:10",
 	proxy_model_failure_cooldown_minutes: "720",
 	proxy_model_failure_cooldown_threshold: "3",
 	proxy_model_failure_auto_disable_threshold: "3",

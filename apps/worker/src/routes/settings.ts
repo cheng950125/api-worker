@@ -5,6 +5,8 @@ import {
 	shouldResetLastRun,
 } from "../services/checkin-scheduler";
 import {
+	getChannelRecoveryProbeEnabled,
+	getChannelRecoveryProbeScheduleTime,
 	getCheckinScheduleTime,
 	getProxyRuntimeSettings,
 	getRetentionDays,
@@ -12,6 +14,8 @@ import {
 	getSessionTtlHours,
 	isAdminPasswordSet,
 	normalizeErrorCodeList,
+	setChannelRecoveryProbeEnabled,
+	setChannelRecoveryProbeScheduleTime,
 	setAdminPasswordHash,
 	setCheckinScheduleTime,
 	setProxyRuntimeSettings,
@@ -32,6 +36,9 @@ settings.get("/", async (c) => {
 	const sessionTtlHours = await getSessionTtlHours(db);
 	const adminPasswordSet = await isAdminPasswordSet(db);
 	const checkinScheduleTime = await getCheckinScheduleTime(db);
+	const channelRecoveryProbeEnabled = await getChannelRecoveryProbeEnabled(db);
+	const channelRecoveryProbeScheduleTime =
+		await getChannelRecoveryProbeScheduleTime(db);
 	const runtimeSettings = await getProxyRuntimeSettings(db);
 	const runtimeConfig = getRuntimeProxyConfig(c.env, runtimeSettings);
 
@@ -40,6 +47,8 @@ settings.get("/", async (c) => {
 		session_ttl_hours: sessionTtlHours,
 		admin_password_set: adminPasswordSet,
 		checkin_schedule_time: checkinScheduleTime,
+		channel_recovery_probe_enabled: channelRecoveryProbeEnabled,
+		channel_recovery_probe_schedule_time: channelRecoveryProbeScheduleTime,
 		proxy_model_failure_cooldown_minutes:
 			runtimeSettings.model_failure_cooldown_minutes,
 		proxy_model_failure_cooldown_threshold:
@@ -506,7 +515,70 @@ settings.put("/", async (c) => {
 		await setCheckinScheduleTime(db, timeValue);
 		touched = true;
 		scheduleTouched = true;
-		scheduleReset = shouldResetLastRun(currentTime, timeValue);
+		scheduleReset = scheduleReset || shouldResetLastRun(currentTime, timeValue);
+	}
+
+	if (body.channel_recovery_probe_enabled !== undefined) {
+		const raw = body.channel_recovery_probe_enabled;
+		let enabled: boolean | null = null;
+		if (typeof raw === "boolean") {
+			enabled = raw;
+		} else if (typeof raw === "number") {
+			enabled = raw !== 0;
+		} else if (typeof raw === "string") {
+			const normalized = raw.trim().toLowerCase();
+			if (["1", "true", "yes", "on"].includes(normalized)) {
+				enabled = true;
+			} else if (["0", "false", "no", "off"].includes(normalized)) {
+				enabled = false;
+			}
+		}
+		if (enabled === null) {
+			return jsonError(
+				c,
+				400,
+				"invalid_channel_recovery_probe_enabled",
+				"invalid_channel_recovery_probe_enabled",
+			);
+		}
+		const currentEnabled = await getChannelRecoveryProbeEnabled(db);
+		await setChannelRecoveryProbeEnabled(db, enabled);
+		touched = true;
+		scheduleTouched = true;
+		scheduleReset = scheduleReset || (!currentEnabled && enabled);
+	}
+
+	if (body.channel_recovery_probe_schedule_time !== undefined) {
+		const currentTime = await getChannelRecoveryProbeScheduleTime(db);
+		const timeValue = String(body.channel_recovery_probe_schedule_time).trim();
+		if (!/^\d{2}:\d{2}$/.test(timeValue)) {
+			return jsonError(
+				c,
+				400,
+				"invalid_channel_recovery_probe_schedule_time",
+				"invalid_channel_recovery_probe_schedule_time",
+			);
+		}
+		const [hour, minute] = timeValue.split(":").map((value) => Number(value));
+		if (
+			Number.isNaN(hour) ||
+			Number.isNaN(minute) ||
+			hour < 0 ||
+			hour > 23 ||
+			minute < 0 ||
+			minute > 59
+		) {
+			return jsonError(
+				c,
+				400,
+				"invalid_channel_recovery_probe_schedule_time",
+				"invalid_channel_recovery_probe_schedule_time",
+			);
+		}
+		await setChannelRecoveryProbeScheduleTime(db, timeValue);
+		touched = true;
+		scheduleTouched = true;
+		scheduleReset = scheduleReset || shouldResetLastRun(currentTime, timeValue);
 	}
 
 	if (runtimeTouched) {

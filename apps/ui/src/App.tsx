@@ -698,6 +698,10 @@ const App = () => {
 			session_ttl_hours: String(data.settings.session_ttl_hours ?? 12),
 			admin_password: "",
 			checkin_schedule_time: data.settings.checkin_schedule_time ?? "00:10",
+			channel_recovery_probe_enabled:
+				data.settings.channel_recovery_probe_enabled ?? false,
+			channel_recovery_probe_schedule_time:
+				data.settings.channel_recovery_probe_schedule_time ?? "03:10",
 			proxy_model_failure_cooldown_minutes: String(
 				runtimeSettings?.model_failure_cooldown_minutes ?? 720,
 			),
@@ -1162,6 +1166,47 @@ const App = () => {
 		startAction,
 	]);
 
+	const handleSiteProbeRecovery = useCallback(async () => {
+		const actionKey = buildActionKey("site:probeRecovery");
+		if (isActionPending(actionKey)) {
+			return;
+		}
+		startAction(actionKey);
+		try {
+			const result = await apiFetch<{
+				summary: {
+					total: number;
+					attempted: number;
+					recovered: number;
+					failed: number;
+				};
+			}>("/api/sites/probe-recovery", {
+				method: "POST",
+			});
+			await loadSites();
+			const summary = result.summary;
+			if (summary.total === 0) {
+				pushNotice("info", "当前没有禁用站点可探测");
+				return;
+			}
+			pushNotice(
+				summary.recovered > 0 ? "success" : "warning",
+				`探测完成：恢复 ${summary.recovered}/${summary.total}，失败 ${summary.failed}。`,
+			);
+		} catch (error) {
+			pushNotice("error", (error as Error).message);
+		} finally {
+			endAction(actionKey);
+		}
+	}, [
+		apiFetch,
+		endAction,
+		isActionPending,
+		loadSites,
+		pushNotice,
+		startAction,
+	]);
+
 	const handleSiteSubmit = useCallback(
 		async (event: Event) => {
 			event.preventDefault();
@@ -1374,6 +1419,8 @@ const App = () => {
 			const upstreamTimeoutMs = Number(settingsForm.proxy_upstream_timeout_ms);
 			const retryMaxRetries = Number(settingsForm.proxy_retry_max_retries);
 			const retrySleepMs = Number(settingsForm.proxy_retry_sleep_ms);
+			const channelRecoveryProbeScheduleTime =
+				settingsForm.channel_recovery_probe_schedule_time.trim();
 			const normalizeErrorCodeList = (value: string[]): string[] => {
 				return Array.from(
 					new Set(
@@ -1511,12 +1558,19 @@ const App = () => {
 				pushNotice("warning", "大请求下沉阈值需为非负整数");
 				return;
 			}
+			if (!/^\d{2}:\d{2}$/.test(channelRecoveryProbeScheduleTime)) {
+				pushNotice("warning", "禁用渠道抽测时间需为 HH:mm");
+				return;
+			}
 			startAction(actionKey);
 			const payload: Record<string, unknown> = {
 				log_retention_days: retention,
 				session_ttl_hours: sessionTtlHours,
 				checkin_schedule_time:
 					settingsForm.checkin_schedule_time.trim() || "00:10",
+				channel_recovery_probe_enabled:
+					settingsForm.channel_recovery_probe_enabled,
+				channel_recovery_probe_schedule_time: channelRecoveryProbeScheduleTime,
 				proxy_model_failure_cooldown_minutes: failureCooldownMinutes,
 				proxy_model_failure_cooldown_threshold: failureCooldownThreshold,
 				proxy_model_failure_auto_disable_threshold: failureAutoDisableThreshold,
@@ -2059,6 +2113,7 @@ const App = () => {
 					onFormChange={handleSiteFormChange}
 					onRunAll={handleCheckinRunAll}
 					onTestAll={handleSiteTestAll}
+					onProbeRecovery={handleSiteProbeRecovery}
 					testFailureCount={siteTestAllReport?.failedSites.length ?? 0}
 					onOpenTestFailures={() => setSiteTestReportOpen(true)}
 				/>

@@ -125,6 +125,8 @@ export type Settings = {
 	session_ttl_hours: number;
 	admin_password_set?: boolean;
 	checkin_schedule_time?: string;
+	channel_recovery_probe_enabled?: boolean;
+	channel_recovery_probe_schedule_time?: string;
 	proxy_model_failure_cooldown_minutes?: number;
 	proxy_model_failure_cooldown_threshold?: number;
 	proxy_model_failure_auto_disable_threshold?: number;
@@ -214,6 +216,8 @@ export type SettingsForm = {
 	session_ttl_hours: string;
 	admin_password: string;
 	checkin_schedule_time: string;
+	channel_recovery_probe_enabled: boolean;
+	channel_recovery_probe_schedule_time: string;
 	proxy_model_failure_cooldown_minutes: string;
 	proxy_model_failure_cooldown_threshold: string;
 	proxy_model_failure_auto_disable_threshold: string;

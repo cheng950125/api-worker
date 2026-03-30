@@ -9,10 +9,17 @@ import {
 	computeNextBeijingRun,
 } from "../utils/time";
 import { runCheckinAll } from "./checkin-runner";
-import { getCheckinScheduleTime } from "./settings";
+import { recoverDisabledChannels } from "./channel-recovery";
+import { invalidateSelectionHotCache } from "./hot-kv";
+import {
+	getChannelRecoveryProbeEnabled,
+	getChannelRecoveryProbeScheduleTime,
+	getCheckinScheduleTime,
+} from "./settings";
 
 const SCHEDULER_NAME = "checkin-scheduler";
 const LAST_RUN_DATE_KEY = "last_run_date";
+const CHANNEL_RECOVERY_LAST_RUN_DATE_KEY = "channel_recovery_last_run_date";
 const INTERNAL_IMMEDIATE_RESCHEDULE_DELAY_MS = 1000;
 
 export const getCheckinSchedulerStub = (namespace: DurableObjectNamespace) =>
@@ -53,6 +60,8 @@ export const computeNextAlarmAt = (
 
 type RescheduleResult = {
 	nextRunAt: string | null;
+	checkinNextRunAt: string | null;
+	channelRecoveryNextRunAt: string | null;
 };
 
 export class CheckinScheduler {
@@ -82,10 +91,16 @@ export class CheckinScheduler {
 		if (request.method === "GET" && url.pathname === "/status") {
 			const lastRunDate =
 				(await this.state.storage.get<string>(LAST_RUN_DATE_KEY)) ?? null;
+			const channelRecoveryLastRunDate =
+				(await this.state.storage.get<string>(
+					CHANNEL_RECOVERY_LAST_RUN_DATE_KEY,
+				)) ?? null;
 			return new Response(
 				JSON.stringify({
 					ok: true,
 					last_run_date: lastRunDate,
+					checkin_last_run_date: lastRunDate,
+					channel_recovery_last_run_date: channelRecoveryLastRunDate,
 				}),
 				{ headers: { "Content-Type": "application/json" } },
 			);
@@ -99,12 +114,39 @@ export class CheckinScheduler {
 
 	private async handleAlarm(): Promise<void> {
 		const now = new Date();
-		const scheduleTime = await getCheckinScheduleTime(this.env.DB);
-		const lastRunDate =
+		const checkinScheduleTime = await getCheckinScheduleTime(this.env.DB);
+		const checkinLastRunDate =
 			(await this.state.storage.get<string>(LAST_RUN_DATE_KEY)) ?? null;
-		if (shouldRunCheckin(now, scheduleTime, lastRunDate)) {
+		if (shouldRunCheckin(now, checkinScheduleTime, checkinLastRunDate)) {
 			await runCheckinAll(this.env.DB, now);
 			await this.state.storage.put(LAST_RUN_DATE_KEY, beijingDateString(now));
+		}
+		const channelRecoveryEnabled = await getChannelRecoveryProbeEnabled(
+			this.env.DB,
+		);
+		if (channelRecoveryEnabled) {
+			const channelRecoveryScheduleTime =
+				await getChannelRecoveryProbeScheduleTime(this.env.DB);
+			const channelRecoveryLastRunDate =
+				(await this.state.storage.get<string>(
+					CHANNEL_RECOVERY_LAST_RUN_DATE_KEY,
+				)) ?? null;
+			if (
+				shouldRunCheckin(
+					now,
+					channelRecoveryScheduleTime,
+					channelRecoveryLastRunDate,
+				)
+			) {
+				const recoveryResult = await recoverDisabledChannels(this.env.DB);
+				if (recoveryResult.recovered > 0) {
+					await invalidateSelectionHotCache(this.env.KV_HOT);
+				}
+				await this.state.storage.put(
+					CHANNEL_RECOVERY_LAST_RUN_DATE_KEY,
+					beijingDateString(now),
+				);
+			}
 		}
 		await this.reschedule(now);
 	}
@@ -113,12 +155,36 @@ export class CheckinScheduler {
 		now: Date = new Date(),
 		reset = false,
 	): Promise<RescheduleResult> {
-		const scheduleTime = await getCheckinScheduleTime(this.env.DB);
+		const checkinScheduleTime = await getCheckinScheduleTime(this.env.DB);
+		const channelRecoveryEnabled = await getChannelRecoveryProbeEnabled(
+			this.env.DB,
+		);
+		const channelRecoveryScheduleTime =
+			await getChannelRecoveryProbeScheduleTime(this.env.DB);
 		if (reset) {
 			await this.state.storage.delete(LAST_RUN_DATE_KEY);
+			await this.state.storage.delete(CHANNEL_RECOVERY_LAST_RUN_DATE_KEY);
 		}
-		const nextRun = computeNextAlarmAt(now, scheduleTime, reset);
+		const checkinNextRunAt = computeNextAlarmAt(
+			now,
+			checkinScheduleTime,
+			reset,
+		);
+		const channelRecoveryNextRunAt = channelRecoveryEnabled
+			? computeNextAlarmAt(now, channelRecoveryScheduleTime, reset)
+			: null;
+		const nextRun = channelRecoveryNextRunAt
+			? checkinNextRunAt.getTime() <= channelRecoveryNextRunAt.getTime()
+				? checkinNextRunAt
+				: channelRecoveryNextRunAt
+			: checkinNextRunAt;
 		await this.state.storage.setAlarm(nextRun.getTime());
-		return { nextRunAt: nextRun.toISOString() };
+		return {
+			nextRunAt: nextRun.toISOString(),
+			checkinNextRunAt: checkinNextRunAt.toISOString(),
+			channelRecoveryNextRunAt: channelRecoveryNextRunAt
+				? channelRecoveryNextRunAt.toISOString()
+				: null,
+		};
 	}
 }

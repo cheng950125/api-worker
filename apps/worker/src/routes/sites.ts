@@ -11,6 +11,7 @@ import {
 	listChannels,
 	updateChannel,
 } from "../services/channel-repo";
+import { recoverDisabledChannels } from "../services/channel-recovery";
 import { runCheckinAll, runCheckinSingle } from "../services/checkin-runner";
 import { invalidateSelectionHotCache } from "../services/hot-kv";
 import {
@@ -433,6 +434,24 @@ sites.post("/checkin-all", async (c) => {
 		results: result.results,
 		summary: result.summary,
 		runs_at: result.runsAt,
+	});
+});
+
+sites.post("/probe-recovery", async (c) => {
+	const runsAt = new Date().toISOString();
+	const result = await recoverDisabledChannels(c.env.DB);
+	if (result.recovered > 0) {
+		await invalidateSelectionHotCache(c.env.KV_HOT);
+	}
+	return c.json({
+		summary: {
+			total: result.total,
+			attempted: result.attempted,
+			recovered: result.recovered,
+			failed: result.failed,
+		},
+		items: result.items,
+		runs_at: runsAt,
 	});
 });
 

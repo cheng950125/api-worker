@@ -60,6 +60,7 @@ type SitesViewProps = {
 	onFormChange: (patch: Partial<SiteForm>) => void;
 	onRunAll: () => void;
 	onTestAll: () => void;
+	onProbeRecovery: () => void;
 	testFailureCount?: number;
 	onOpenTestFailures?: () => void;
 };
@@ -134,6 +135,7 @@ export const SitesView = ({
 	onFormChange,
 	onRunAll,
 	onTestAll,
+	onProbeRecovery,
 	testFailureCount = 0,
 	onOpenTestFailures,
 }: SitesViewProps) => {
@@ -143,6 +145,7 @@ export const SitesView = ({
 	const isSubmitting = isActionPending("site:submit");
 	const isTestingAll = isActionPending("site:testAll");
 	const isCheckinAll = isActionPending("site:checkinAll");
+	const isProbeRecovery = isActionPending("site:probeRecovery");
 	const [localSearch, setLocalSearch] = useState(siteSearch);
 	const isOfficialType =
 		siteForm.site_type === "openai" ||
@@ -300,6 +303,15 @@ export const SitesView = ({
 							onClick={onTestAll}
 						>
 							{isTestingAll ? "测试中..." : "一键测试"}
+						</Button>
+						<Button
+							class="h-9 px-4 text-xs"
+							size="sm"
+							type="button"
+							disabled={isProbeRecovery}
+							onClick={onProbeRecovery}
+						>
+							{isProbeRecovery ? "探测中..." : "探测可用渠道"}
 						</Button>
 						<Button
 							class="h-9 px-4 text-xs"

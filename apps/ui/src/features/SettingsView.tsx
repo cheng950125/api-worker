@@ -155,6 +155,51 @@ export const SettingsView = ({
 								}}
 							/>
 						</div>
+						<div class="app-settings-row">
+							<div class="app-settings-row__main">
+								<span class="app-settings-row__label">
+									启用禁用渠道自动抽测恢复
+								</span>
+								<p class="app-settings-row__hint">
+									每天按设定时间探测禁用渠道，每个渠道随机选模型验证，成功后自动恢复
+								</p>
+							</div>
+							<div class="app-settings-row__switch">
+								<Switch
+									checked={settingsForm.channel_recovery_probe_enabled}
+									onToggle={(next) => {
+										onFormChange({ channel_recovery_probe_enabled: next });
+									}}
+								/>
+							</div>
+						</div>
+						<div class="app-settings-row">
+							<div class="app-settings-row__main">
+								<label
+									class="app-settings-row__label"
+									for="channel-recovery-probe-schedule-time"
+								>
+									抽测时间（中国时间）
+								</label>
+								<p class="app-settings-row__hint">
+									每天执行禁用渠道抽测恢复任务的时间
+								</p>
+							</div>
+							<Input
+								class="app-settings-row__control"
+								id="channel-recovery-probe-schedule-time"
+								name="channel_recovery_probe_schedule_time"
+								type="time"
+								disabled={!settingsForm.channel_recovery_probe_enabled}
+								value={settingsForm.channel_recovery_probe_schedule_time}
+								onInput={(event) => {
+									const target = event.currentTarget as HTMLInputElement | null;
+									onFormChange({
+										channel_recovery_probe_schedule_time: target?.value ?? "",
+									});
+								}}
+							/>
+						</div>
 
 						<div class="app-settings-row app-settings-row--stack">
 							<div class="app-settings-row__main">
