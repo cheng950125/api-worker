@@ -49,7 +49,7 @@ const printUsage = () => {
 	console.log("用法:");
 	console.log("  bun run autostart");
 	console.log(
-		"  bun run autostart -- enable [dev 参数，空格分隔，例如 --no-ui --cloud-db]",
+		"  bun run autostart -- enable [dev 参数，空格分隔，例如 --no-ui --remote-d1]",
 	);
 	console.log("  bun run autostart -- disable");
 	console.log("  bun run autostart -- status");
@@ -59,7 +59,8 @@ const interactiveEnableOptions = [
 	{ flag: "--no-ui", label: "关闭热加载 UI" },
 	{ flag: "--no-attempt-worker", label: "不启动调用执行器 attempt-worker" },
 	{ flag: "--no-hot-cache", label: "禁用热缓存 KV_HOT" },
-	{ flag: "--cloud-db", label: "连接云端数据库" },
+	{ flag: "--remote-d1", label: "连接云端 D1/KV（执行仍在本地）" },
+	{ flag: "--remote-exec", label: "主 worker / attempt-worker 走远端预览" },
 ];
 
 const uiBuildModeOptions = [

@@ -162,17 +162,28 @@ export const buildPageItems = (current: number, total: number): PageItem[] => {
 
 export type UsageStatusDetail = {
 	label: string;
+	tone: "success" | "warning" | "danger" | "default";
 };
 
 export const buildUsageStatusDetail = (log: UsageLog): UsageStatusDetail => {
 	const statusCode = log.upstream_status ?? null;
+	const tone =
+		log.status === "warn"
+			? "warning"
+			: log.status === "ok" && !log.error_code
+				? "success"
+				: log.error_code
+					? "danger"
+					: "default";
 	if (statusCode !== null && statusCode !== undefined) {
 		return {
 			label: String(statusCode),
+			tone,
 		};
 	}
 	return {
-		label: "未知",
+		label: log.status === "warn" ? "告警" : "未知",
+		tone,
 	};
 };
 

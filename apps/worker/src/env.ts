@@ -9,6 +9,7 @@ export type Bindings = {
 	DB: D1Database;
 	KV_HOT?: KVNamespace;
 	ATTEMPT_WORKER?: Fetcher;
+	LOCAL_ATTEMPT_WORKER_URL?: string;
 	CORS_ORIGIN?: string;
 	CHECKIN_SCHEDULER: DurableObjectNamespace;
 };

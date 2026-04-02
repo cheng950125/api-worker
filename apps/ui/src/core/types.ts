@@ -217,6 +217,7 @@ export type RuntimeProxySettings = {
 export type RuntimeProxyConfig = RuntimeProxySettings & {
 	attempt_worker_bound: boolean;
 	attempt_worker_fallback_active: boolean;
+	attempt_worker_transport: "none" | "local_http" | "binding";
 };
 
 export type ModelChannel = {

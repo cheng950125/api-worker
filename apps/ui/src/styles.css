@@ -151,6 +151,12 @@ body {
 	border-color: rgba(48, 209, 88, 0.28);
 }
 
+.app-chip--warning {
+	background: rgba(255, 159, 10, 0.16);
+	color: #9a4d00;
+	border-color: rgba(255, 159, 10, 0.28);
+}
+
 .app-chip--danger {
 	background: rgba(255, 69, 58, 0.15);
 	color: #b42318;
@@ -1877,6 +1883,12 @@ body {
 	background: #ecfdf3;
 	border-color: #bbf7d0;
 	color: #166534;
+}
+
+.app-chip--warning {
+	background: #fff7ed;
+	border-color: #fed7aa;
+	color: #9a3412;
 }
 
 .app-chip--danger {

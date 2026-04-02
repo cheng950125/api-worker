@@ -1,13 +1,18 @@
 import { Hono } from "hono";
 import {
 	extractResponsesRequestHints,
+	normalizeProxyStreamUsageMode,
 	repairOpenAiToolCallChain,
+	resolveStreamMetaPartialReason,
+	shouldMarkStreamMetaPartial,
+	shouldParseSuccessStreamUsage,
 	validateOpenAiToolCallChain,
 } from "../../../shared-core/src";
 import { safeJsonParse } from "../../../worker/src/utils/json";
 import {
 	parseUsageFromHeaders,
 	parseUsageFromSse,
+	type StreamUsageOptions,
 } from "../../../worker/src/utils/usage";
 import type { AppEnv } from "../env";
 
@@ -41,6 +46,7 @@ type AttemptRequest = {
 	timeoutMs?: number;
 	responsePath?: string | null;
 	fallbackPath?: string | null;
+	streamUsage?: StreamUsageOptions | null;
 };
 
 type DispatchAttemptRequest = AttemptRequest & {
@@ -52,6 +58,7 @@ type DispatchAttemptRequest = AttemptRequest & {
 type DispatchRequest = {
 	attempts?: DispatchAttemptRequest[];
 	retryConfig?: RetryConfigPayload | null;
+	streamUsage?: StreamUsageOptions | null;
 };
 
 type AttemptExecutionResult = {
@@ -467,6 +474,7 @@ async function extractOpenAiResponseIdFromSse(
 async function collectAttemptStreamMeta(
 	response: Response,
 	responsePath: string,
+	streamUsage: StreamUsageOptions | null | undefined,
 ): Promise<Record<string, string>> {
 	const contentType = response.headers.get("content-type") ?? "";
 	const endpointType = detectOpenAiEndpointType(responsePath);
@@ -497,26 +505,44 @@ async function collectAttemptStreamMeta(
 	}
 
 	meta[ATTEMPT_STREAM_USAGE_PROCESSED_HEADER] = "1";
+	const mode = normalizeProxyStreamUsageMode(streamUsage?.mode);
 	let usage = parseUsageFromHeaders(response.headers);
 	let firstTokenLatencyMs: number | null = null;
 	let streamMetaPartial = false;
 	let streamMetaReason: string | null = null;
 
-	if (!usage) {
-		const streamUsage = await parseUsageFromSse(response.clone(), {
-			mode: "full",
-			timeoutMs: ATTEMPT_STREAM_USAGE_PARSE_TIMEOUT_MS,
-			maxBytes: ATTEMPT_STREAM_USAGE_MAX_BYTES,
+	if (!usage && shouldParseSuccessStreamUsage(mode)) {
+		const parsedStreamUsage = await parseUsageFromSse(response.clone(), {
+			mode,
+			timeoutMs:
+				streamUsage?.timeoutMs ?? ATTEMPT_STREAM_USAGE_PARSE_TIMEOUT_MS,
+			maxBytes: streamUsage?.maxBytes ?? ATTEMPT_STREAM_USAGE_MAX_BYTES,
 		}).catch(() => null);
-		if (streamUsage) {
-			usage = streamUsage.usage;
-			firstTokenLatencyMs = streamUsage.firstTokenLatencyMs;
-			if (!usage && (streamUsage.eventsSeen ?? 0) > 0) {
-				streamMetaPartial = true;
-				streamMetaReason = streamUsage.timedOut
-					? "usage_parse_timeout"
-					: "usage_missing.stream.signal_absent";
+		if (parsedStreamUsage) {
+			usage = parsedStreamUsage.usage;
+			firstTokenLatencyMs = parsedStreamUsage.firstTokenLatencyMs;
+			streamMetaPartial = shouldMarkStreamMetaPartial({
+				mode,
+				hasImmediateUsage: false,
+				hasParsedUsage: Boolean(parsedStreamUsage.usage),
+				eventsSeen: parsedStreamUsage.eventsSeen,
+			});
+			if (streamMetaPartial) {
+				streamMetaReason = resolveStreamMetaPartialReason({
+					mode,
+					timedOut: parsedStreamUsage.timedOut,
+					eventsSeen: parsedStreamUsage.eventsSeen,
+				});
 			}
+		}
+	} else if (!usage) {
+		streamMetaPartial = shouldMarkStreamMetaPartial({
+			mode,
+			hasImmediateUsage: false,
+			hasParsedUsage: false,
+		});
+		if (streamMetaPartial) {
+			streamMetaReason = resolveStreamMetaPartialReason({ mode });
 		}
 	}
 
@@ -661,6 +687,7 @@ async function executeSingleAttempt(
 
 async function attachAttemptHeaders(
 	source: AttemptExecutionResult,
+	streamUsage: StreamUsageOptions | null | undefined,
 	extraHeaders?: Record<string, string>,
 ): Promise<Response> {
 	const outHeaders = new Headers(source.response.headers);
@@ -673,6 +700,7 @@ async function attachAttemptHeaders(
 	const streamMetaHeaders = await collectAttemptStreamMeta(
 		source.response,
 		source.responsePath,
+		streamUsage,
 	);
 	for (const [key, value] of Object.entries(streamMetaHeaders)) {
 		outHeaders.set(key, value);
@@ -695,7 +723,7 @@ attempt.post("/", async (c) => {
 		return c.json({ error: "invalid_attempt_payload" }, 400);
 	}
 	const result = await executeSingleAttempt(body);
-	return attachAttemptHeaders(result);
+	return attachAttemptHeaders(result, body.streamUsage);
 });
 
 attempt.post("/dispatch", async (c) => {
@@ -737,7 +765,7 @@ attempt.post("/dispatch", async (c) => {
 			channelId,
 		};
 		if (result.response.ok) {
-			return attachAttemptHeaders(result, {
+			return attachAttemptHeaders(result, body?.streamUsage, {
 				[DISPATCH_ATTEMPT_INDEX_HEADER]: String(attemptIndex),
 				[DISPATCH_CHANNEL_ID_HEADER]: channelId,
 			});
@@ -752,7 +780,7 @@ attempt.post("/dispatch", async (c) => {
 				errorMessage,
 			);
 			if (decision.shouldSkip) {
-				return attachAttemptHeaders(result, {
+				return attachAttemptHeaders(result, body?.streamUsage, {
 					[DISPATCH_ATTEMPT_INDEX_HEADER]: String(attemptIndex),
 					[DISPATCH_CHANNEL_ID_HEADER]: channelId,
 					[DISPATCH_STOP_RETRY_HEADER]: "1",
@@ -775,7 +803,7 @@ attempt.post("/dispatch", async (c) => {
 		lastErrorCode,
 		lastErrorMessage,
 	).shouldSkip;
-	return attachAttemptHeaders(lastResult.result, {
+	return attachAttemptHeaders(lastResult.result, body?.streamUsage, {
 		[DISPATCH_ATTEMPT_INDEX_HEADER]: String(lastResult.attemptIndex),
 		[DISPATCH_CHANNEL_ID_HEADER]: lastResult.channelId,
 		...(shouldStopRetry ? { [DISPATCH_STOP_RETRY_HEADER]: "1" } : {}),

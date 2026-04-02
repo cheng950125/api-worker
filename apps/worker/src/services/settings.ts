@@ -1,4 +1,5 @@
 import type { D1Database } from "@cloudflare/workers-types";
+import { normalizeProxyStreamUsageMode } from "../../../shared-core/src";
 import type { Bindings } from "../env";
 import { nowIso, parseScheduleTime } from "../utils/time";
 
@@ -158,6 +159,7 @@ export type RuntimeProxyConfig = {
 	attempt_log_retention_days: number;
 	attempt_worker_bound: boolean;
 	attempt_worker_fallback_active: boolean;
+	attempt_worker_transport: "none" | "local_http" | "binding";
 };
 
 export type ProxyRuntimeSettings = {
@@ -340,14 +342,6 @@ function clearBackupSnapshots(): void {
 	backupSettingsSnapshot = null;
 }
 
-function normalizeStreamUsageMode(value: string | undefined): string {
-	const normalized = (value ?? "").toLowerCase();
-	if (normalized === "off" || normalized === "full" || normalized === "lite") {
-		return normalized;
-	}
-	return DEFAULT_PROXY_STREAM_USAGE_MODE;
-}
-
 function normalizeBackupSyncMode(value: string | undefined): BackupSyncMode {
 	const normalized = (value ?? "").trim().toLowerCase();
 	if (
@@ -463,7 +457,7 @@ export async function getProxyRuntimeSettings(
 			settings[MODEL_FAILURE_COOLDOWN_THRESHOLD_KEY] ?? null,
 			DEFAULT_MODEL_FAILURE_COOLDOWN_THRESHOLD,
 		),
-		stream_usage_mode: normalizeStreamUsageMode(
+		stream_usage_mode: normalizeProxyStreamUsageMode(
 			settings[PROXY_STREAM_USAGE_MODE_KEY],
 		),
 		stream_usage_max_parsers: parseNonNegativeSetting(
@@ -510,23 +504,30 @@ export async function getProxyRuntimeSettings(
 	return value;
 }
 
-/**
- * Returns runtime proxy configuration derived from settings and environment.
- *
- * @param env - Worker bindings.
- * @param settings - Runtime settings snapshot.
- * @returns Runtime proxy configuration for display.
- */
+function resolveAttemptWorkerTransport(
+	env: Bindings,
+): RuntimeProxyConfig["attempt_worker_transport"] {
+	if (env.LOCAL_ATTEMPT_WORKER_URL?.trim()) {
+		return "local_http";
+	}
+	if (env.ATTEMPT_WORKER) {
+		return "binding";
+	}
+	return "none";
+}
+
 export function getRuntimeProxyConfig(
 	env: Bindings,
 	settings: ProxyRuntimeSettings,
 ): RuntimeProxyConfig {
-	const attemptWorkerBound = Boolean(env.ATTEMPT_WORKER);
+	const attemptWorkerTransport = resolveAttemptWorkerTransport(env);
+	const attemptWorkerBound = attemptWorkerTransport !== "none";
 	return {
 		...settings,
 		attempt_worker_bound: attemptWorkerBound,
 		attempt_worker_fallback_active:
 			attemptWorkerBound && settings.attempt_worker_fallback_enabled,
+		attempt_worker_transport: attemptWorkerTransport,
 	};
 }
 
@@ -631,7 +632,11 @@ export async function setProxyRuntimeSettings(
 	}
 	if (update.stream_usage_mode !== undefined) {
 		tasks.push(
-			upsertSetting(db, PROXY_STREAM_USAGE_MODE_KEY, update.stream_usage_mode),
+			upsertSetting(
+				db,
+				PROXY_STREAM_USAGE_MODE_KEY,
+				normalizeProxyStreamUsageMode(update.stream_usage_mode),
+			),
 		);
 	}
 	if (update.stream_usage_max_parsers !== undefined) {

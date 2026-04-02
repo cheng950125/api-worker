@@ -44,34 +44,34 @@ const streamUsageModes = [
 	{
 		value: "full",
 		label: "FULL",
-		hint: "全部都解析（流式与非流式、成功与失败都尽量解析）",
+		hint: "成功流式必解析，失败流式也尽量补解析",
 		cpu: "高开销",
 		rules: [
-			"成功响应会尽量提取 usage。",
-			"失败响应也会尽量提取 usage。",
-			"解析失败不会改主响应状态，只记录诊断信息。",
+			"成功流式会优先补做 SSE usage 解析。",
+			"失败流式也会尝试补 usage，用于更完整归因。",
+			"即使没解析出 usage，也只会记为告警，不会把 200 直接打成错误。",
 		],
 	},
 	{
 		value: "lite",
 		label: "LITE",
-		hint: "仅成功流式解析（稳态策略）",
+		hint: "仅成功流式补解析，失败流式不深挖",
 		cpu: "中开销",
 		rules: [
 			"仅在成功且流式响应时启用 SSE 解析。",
 			"非流式优先使用 header/json 即时字段。",
-			"失败响应不做深度解析。",
+			"失败流式不做深度解析，适合作为稳态默认值。",
 		],
 	},
 	{
 		value: "off",
 		label: "OFF",
-		hint: "仅头信息/JSON（不跑 SSE 解析）",
+		hint: "只认头信息 / JSON，不跑 SSE 解析",
 		cpu: "低开销",
 		rules: [
 			"不启动 SSE usage 解析任务。",
 			"仅使用 header/json 即时字段。",
-			"适合优先控制 CPU 峰值。",
+			"流式缺少 usage 时会落为黄色告警，适合优先控制 CPU 峰值。",
 		],
 	},
 ] as const;
@@ -144,9 +144,11 @@ export const SettingsView = ({
 	const attemptWorkerBoundValue =
 		runtimeConfig === null || runtimeConfig === undefined
 			? "-"
-			: runtimeConfig.attempt_worker_bound
-				? "已绑定"
-				: "未绑定";
+			: runtimeConfig.attempt_worker_transport === "local_http"
+				? "本地 HTTP"
+				: runtimeConfig.attempt_worker_transport === "binding"
+					? "Service Binding"
+					: "未启用";
 	const attemptWorkerActiveValue =
 		runtimeConfig === null || runtimeConfig === undefined
 			? "-"

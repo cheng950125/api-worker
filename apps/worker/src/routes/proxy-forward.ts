@@ -5,8 +5,9 @@ import type { AppEnv } from "../env";
 const proxyForward = new Hono<AppEnv>();
 
 proxyForward.all("/*", (async (c: Context<AppEnv>) => {
+	const localAttemptWorkerUrl = c.env.LOCAL_ATTEMPT_WORKER_URL?.trim();
 	const binding = c.env.ATTEMPT_WORKER;
-	if (!binding) {
+	if (!localAttemptWorkerUrl && !binding) {
 		return new Response(
 			JSON.stringify({
 				error: {
@@ -24,7 +25,9 @@ proxyForward.all("/*", (async (c: Context<AppEnv>) => {
 	}
 
 	const incomingUrl = new URL(c.req.url);
-	const targetUrl = `https://attempt-worker${incomingUrl.pathname}${incomingUrl.search}`;
+	const targetUrl = localAttemptWorkerUrl
+		? `${localAttemptWorkerUrl.replace(/\/+$/u, "")}${incomingUrl.pathname}${incomingUrl.search}`
+		: `https://attempt-worker${incomingUrl.pathname}${incomingUrl.search}`;
 	const headers = new Headers(c.req.raw.headers);
 	headers.delete("host");
 	const requestInit: RequestInit = {
@@ -34,7 +37,10 @@ proxyForward.all("/*", (async (c: Context<AppEnv>) => {
 	if (c.req.method !== "GET" && c.req.method !== "HEAD") {
 		requestInit.body = c.req.raw.body;
 	}
-	return binding.fetch(targetUrl, requestInit as never) as unknown as Response;
+	if (localAttemptWorkerUrl) {
+		return fetch(targetUrl, requestInit) as unknown as Response;
+	}
+	return binding!.fetch(targetUrl, requestInit as never) as unknown as Response;
 }) as never);
 
 export default proxyForward;

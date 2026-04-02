@@ -132,7 +132,8 @@ bun run dev -- [可选参数]
 
 - `--no-attempt-worker`：不启动调用执行器（attempt-worker）
 - `--no-ui`：不启动 UI dev server
-- `--cloud-db`：连接云端 D1/KV（会自动准备 remote 配置）
+- `--remote-d1`：连接云端 D1/KV，但主 worker 与 attempt-worker 仍在本地执行
+- `--remote-exec`：主 worker / attempt-worker 都切到远端预览执行（隐含 `--remote-d1`）
 - `--no-hot-cache`：仅禁用 `KV_HOT` 热缓存（不影响其他内存级缓存）
 - `--build-ui`：启动前先构建 UI（`bun run build:ui`）
 - `--skip-ui-build`：跳过 UI 预构建（用于覆盖 `--build-ui` 默认行为）
@@ -142,12 +143,13 @@ bun run dev -- [可选参数]
 
 常用示例：
 
-- 默认启动（主 Worker + 调用执行器 + UI）：`bun run dev`
+- 默认启动（主 Worker + 本地 attempt-worker + UI）：`bun run dev`
 - 主 Worker + UI（不启调用执行器）：`bun run dev -- --no-attempt-worker`
 - 仅主 Worker：`bun run dev -- --no-attempt-worker --no-ui`
-- 默认启动 + 云端数据库：`bun run dev -- --cloud-db`
-- 仅主 Worker + 云端数据库 + 禁用热缓存：`bun run dev -- --no-attempt-worker --no-ui --cloud-db --no-hot-cache`
-- 后台启动（仅主 Worker + 云端数据库 + 禁用热缓存）：`bun run dev -- --no-attempt-worker --no-ui --cloud-db --no-hot-cache --bg`
+- 默认启动 + 云端 D1/KV：`bun run dev -- --remote-d1`
+- 仅主 Worker + 云端 D1/KV + 禁用热缓存：`bun run dev -- --no-attempt-worker --no-ui --remote-d1 --no-hot-cache`
+- 后台启动（仅主 Worker + 云端 D1/KV + 禁用热缓存）：`bun run dev -- --no-attempt-worker --no-ui --remote-d1 --no-hot-cache --bg`
+- 远端预览执行：`bun run dev -- --remote-exec`
 - 查看后台状态：`bun run dev -- --status`
 - 停止后台实例：`bun run dev -- --stop`
 
@@ -157,13 +159,13 @@ bun run dev -- [可选参数]
 - 开启自启动：`bun run autostart -- enable [dev 参数，空格分隔]`
 - 关闭自启动：`bun run autostart -- disable`
 - 查看状态：`bun run autostart -- status`
-- 示例：`bun run autostart -- enable --no-attempt-worker --cloud-db --no-ui`
+- 示例：`bun run autostart -- enable --no-attempt-worker --remote-d1 --no-ui`
 
 快捷命令（仅主 Worker + 禁用热缓存）：
 
 - 默认先构建 UI 后启动：`bun run dev:worker`
 - 可选跳过 UI 构建：`bun run dev:worker -- --skip-ui-build`
-- 同样支持叠加参数（例如云端库 + 后台）：`bun run dev:worker -- --cloud-db --bg`
+- 同样支持叠加参数（例如云端 D1 + 后台）：`bun run dev:worker -- --remote-d1 --bg`
 
 仅主 Worker时是否受 UI 影响：
 
@@ -215,13 +217,16 @@ cp .env.example .env
 ```bash
 bun run prepare:remote-config
 bun run db:migrate:remote
-bun run dev -- --cloud-db
+bun run dev -- --remote-d1
 bun run autostart -- status
 ```
 
 说明：
 
 - `prepare:remote-config` 会在本地生成 `apps/worker/.wrangler.remote.toml` 与 `apps/attempt-worker/.wrangler.remote.toml`
+- `--remote-d1` 会使用本地执行 + remote bindings，不再默认切到 `wrangler dev --remote`
+- 默认情况下主 worker 会优先走本地 `attempt-worker`（`http://127.0.0.1:<DEV_ATTEMPT_WORKER_PORT>`）
+- 只有显式传入 `--remote-exec` 时，主 worker / attempt-worker 才会改走远端预览执行
 - `--no-hot-cache` 会额外生成 no-hot 配置并移除 `KV_HOT` 绑定，仅影响热缓存路径
 - 这两个文件已加入 `.gitignore`，不会入库
 - 如需单独启动服务，可用 `bun --cwd apps/worker run dev:remote` 与 `bun --cwd apps/attempt-worker run dev:remote`
@@ -237,7 +242,7 @@ bun run format
 bun run check
 bun run prepare:remote-config
 bun run db:migrate:remote
-bun run dev -- --cloud-db
+bun run dev -- --remote-d1
 ```
 
 ## Agent 协作规范

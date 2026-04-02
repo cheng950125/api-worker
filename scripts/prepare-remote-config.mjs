@@ -143,7 +143,15 @@ const buildRemoteConfig = (sourceText, ids) => {
 		throw new Error("未找到 KV_HOT 的 id 配置项，无法生成远端配置");
 	}
 
-	return kvReplaced;
+	return kvReplaced
+		.replace(
+			/(\[\[d1_databases\]\][\s\S]*?\bdatabase_id\s*=\s*"[^"]*"\s*)(?!\bremote\s*=)/u,
+			"$1remote = true\n",
+		)
+		.replace(
+			/(\[\[kv_namespaces\]\][\s\S]*?\bid\s*=\s*"[^"]*"\s*)(?!\bremote\s*=)/u,
+			"$1remote = true\n",
+		);
 };
 
 const renderPath = (relativePath) => path.join(ROOT, relativePath);

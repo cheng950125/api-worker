@@ -5,8 +5,13 @@ import {
 	hasChatToolOutputHint as hasChatToolOutputHintShared,
 	hasUnresolvedResponsesFunctionCallOutput as hasUnresolvedResponsesFunctionCallOutputShared,
 	isResponsesToolCallNotFoundMessage as isResponsesToolCallNotFoundMessageShared,
+	normalizeProxyStreamUsageMode,
 	repairOpenAiToolCallChain as repairOpenAiToolCallChainShared,
 	resolveLargeRequestOffload,
+	resolveStreamMetaPartialReason,
+	shouldMarkStreamMetaPartial,
+	shouldParseFailureStreamUsage,
+	shouldParseSuccessStreamUsage,
 	shouldTreatMissingUsageAsError,
 	validateOpenAiToolCallChain as validateOpenAiToolCallChainShared,
 } from "../../../shared-core/src";
@@ -160,6 +165,7 @@ const ATTEMPT_BINDING_RESPONSE_PATH_HEADER = "x-ha-attempt-response-path";
 const ATTEMPT_BINDING_LATENCY_HEADER = "x-ha-attempt-latency-ms";
 const ATTEMPT_BINDING_UPSTREAM_REQUEST_ID_HEADER =
 	"x-ha-attempt-upstream-request-id";
+const ATTEMPT_ERROR_CODE_HEADER = "x-ha-attempt-error-code";
 const ATTEMPT_STREAM_USAGE_PROCESSED_HEADER =
 	"x-ha-attempt-stream-usage-processed";
 const ATTEMPT_STREAM_FIRST_TOKEN_LATENCY_HEADER =
@@ -187,6 +193,7 @@ const WEIGHTED_ORDER_FAILED_CODE = "weighted_order_failed";
 const RESPONSE_ADAPT_FAILED_CODE = "response_adapt_failed";
 const STREAM_META_PARTIAL_CODE = "stream_meta_partial";
 const STREAM_META_PARTIAL_BIZ_STATUS = "29011";
+const DEFAULT_STREAM_USAGE_PARSE_MAX_BYTES = 96 * 1024;
 
 let activeStreamUsageParsers = 0;
 
@@ -1510,9 +1517,17 @@ function buildAttemptSequence(
 
 function getStreamUsageOptions(settings: {
 	stream_usage_mode: string;
+	stream_usage_parse_timeout_ms?: number;
 }): StreamUsageOptions {
 	return {
-		mode: settings.stream_usage_mode as StreamUsageMode,
+		mode: normalizeProxyStreamUsageMode(
+			settings.stream_usage_mode,
+		) as StreamUsageMode,
+		timeoutMs: Math.max(
+			0,
+			Math.floor(Number(settings.stream_usage_parse_timeout_ms ?? 0)),
+		),
+		maxBytes: DEFAULT_STREAM_USAGE_PARSE_MAX_BYTES,
 	};
 }
 
@@ -2042,6 +2057,7 @@ type AttemptBindingRequest = {
 	timeoutMs: number;
 	responsePath: string;
 	fallbackPath?: string;
+	streamUsage?: StreamUsageOptions;
 };
 
 type AttemptDispatchRequest = {
@@ -2054,6 +2070,7 @@ type AttemptDispatchRequest = {
 	timeoutMs: number;
 	responsePath: string;
 	fallbackPath?: string;
+	streamUsage?: StreamUsageOptions;
 	streamOptionsInjected?: boolean;
 	strippedBodyText?: string;
 };
@@ -2067,6 +2084,7 @@ type DispatchRetryConfig = {
 type DispatchBindingRequest = {
 	attempts: AttemptDispatchRequest[];
 	retryConfig?: DispatchRetryConfig;
+	streamUsage?: StreamUsageOptions;
 };
 
 type AttemptBindingSuccess = {
@@ -2095,8 +2113,23 @@ type AttemptBindingFailure = {
 	latencyMs: number;
 };
 
-type AttemptBindingResult = AttemptBindingSuccess | AttemptBindingFailure;
-type DispatchBindingResult = DispatchBindingSuccess | AttemptBindingFailure;
+type AttemptWorkerInternalError = {
+	kind: "attempt_worker_error";
+	errorCode: string;
+	errorMessage: string;
+	latencyMs: number;
+	httpStatus: number;
+	errorMetaJson: string | null;
+};
+
+type AttemptBindingResult =
+	| AttemptBindingSuccess
+	| AttemptBindingFailure
+	| AttemptWorkerInternalError;
+type DispatchBindingResult =
+	| DispatchBindingSuccess
+	| AttemptBindingFailure
+	| AttemptWorkerInternalError;
 
 type AttemptBindingPolicy = {
 	fallbackEnabled: boolean;
@@ -2196,6 +2229,98 @@ function normalizeUpstreamRequestIdFromHeaders(
 	return null;
 }
 
+function normalizeAttemptWorkerBaseUrl(
+	value: string | null | undefined,
+): string | null {
+	if (!value) {
+		return null;
+	}
+	const trimmed = value.trim();
+	if (!trimmed) {
+		return null;
+	}
+	return trimmed.replace(/\/+$/u, "");
+}
+
+function registerAttemptWorkerTransportFailure(
+	policy: AttemptBindingPolicy,
+	state: AttemptBindingState,
+): void {
+	state.bindingFailureCount += 1;
+	if (state.bindingFailureCount >= policy.fallbackThreshold) {
+		state.forceLocalDirect = true;
+	}
+}
+
+async function parseAttemptWorkerErrorResponse(
+	response: Response,
+	transport: "local_http" | "binding",
+	started: number,
+): Promise<AttemptWorkerInternalError | null> {
+	if (response.ok) {
+		return null;
+	}
+	if (response.headers.get(ATTEMPT_BINDING_RESPONSE_PATH_HEADER)) {
+		return null;
+	}
+	const contentType = response.headers.get("content-type") ?? "";
+	let errorCode =
+		normalizeStringField(response.headers.get(ATTEMPT_ERROR_CODE_HEADER)) ??
+		"attempt_worker_internal_error";
+	let errorMessage: string | null = null;
+	if (contentType.includes("application/json")) {
+		const payload = await response
+			.clone()
+			.json()
+			.catch(() => null);
+		if (payload && typeof payload === "object") {
+			const record = payload as Record<string, unknown>;
+			if (typeof record.code === "string" && record.code.trim()) {
+				errorCode = record.code.trim();
+			}
+			const nestedError =
+				record.error && typeof record.error === "object"
+					? (record.error as Record<string, unknown>)
+					: null;
+			errorMessage =
+				normalizeStringField(
+					typeof nestedError?.message === "string"
+						? nestedError.message
+						: typeof record.message === "string"
+							? record.message
+							: null,
+				) ?? errorMessage;
+			const nestedCode = normalizeStringField(
+				typeof nestedError?.code === "string" ? nestedError.code : null,
+			);
+			if (nestedCode) {
+				errorCode = nestedCode;
+			}
+		}
+	}
+	if (!errorMessage) {
+		errorMessage =
+			normalizeMessage(
+				await response
+					.clone()
+					.text()
+					.catch(() => ""),
+			) ?? errorCode;
+	}
+	return {
+		kind: "attempt_worker_error",
+		errorCode,
+		errorMessage,
+		latencyMs: Math.max(0, Date.now() - started),
+		httpStatus: response.status,
+		errorMetaJson: JSON.stringify({
+			type: "attempt_worker_internal_error",
+			transport,
+			status: response.status,
+		}),
+	};
+}
+
 async function executeAttemptViaWorker(
 	c: { env: AppEnv["Bindings"] },
 	input: AttemptBindingRequest,
@@ -2240,21 +2365,46 @@ async function executeAttemptViaWorker(
 		};
 	};
 
+	const localAttemptWorkerUrl = normalizeAttemptWorkerBaseUrl(
+		c.env.LOCAL_ATTEMPT_WORKER_URL,
+	);
 	const binding = c.env.ATTEMPT_WORKER;
-	if (!binding || state.forceLocalDirect) {
+	if (state.forceLocalDirect || (!localAttemptWorkerUrl && !binding)) {
 		return executeLocalDirect();
 	}
 	try {
-		const response = await binding.fetch(
-			"https://attempt-worker/internal/attempt",
-			{
-				method: "POST",
-				headers: {
-					"content-type": "application/json",
-				},
-				body: JSON.stringify(input),
+		const requestInit: RequestInit = {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
 			},
+			body: JSON.stringify(input),
+		};
+		const response = localAttemptWorkerUrl
+			? await fetchWithTimeoutLocal(
+					`${localAttemptWorkerUrl}/internal/attempt`,
+					requestInit,
+					Math.max(0, input.timeoutMs),
+				)
+			: await binding!.fetch("https://attempt-worker/internal/attempt", {
+					method: "POST",
+					headers: {
+						"content-type": "application/json",
+					},
+					body: JSON.stringify(input),
+				});
+		const attemptWorkerError = await parseAttemptWorkerErrorResponse(
+			response as unknown as Response,
+			localAttemptWorkerUrl ? "local_http" : "binding",
+			started,
 		);
+		if (attemptWorkerError) {
+			if (!policy.fallbackEnabled) {
+				return attemptWorkerError;
+			}
+			registerAttemptWorkerTransportFailure(policy, state);
+			return executeLocalDirect();
+		}
 		const responsePath =
 			response.headers.get(ATTEMPT_BINDING_RESPONSE_PATH_HEADER) ??
 			input.responsePath;
@@ -2283,10 +2433,7 @@ async function executeAttemptViaWorker(
 				latencyMs: Date.now() - started,
 			};
 		}
-		state.bindingFailureCount += 1;
-		if (state.bindingFailureCount >= policy.fallbackThreshold) {
-			state.forceLocalDirect = true;
-		}
+		registerAttemptWorkerTransportFailure(policy, state);
 		return executeLocalDirect();
 	}
 }
@@ -2298,21 +2445,53 @@ async function executeDispatchViaWorker(
 	state: AttemptBindingState,
 ): Promise<DispatchBindingResult | null> {
 	const started = Date.now();
+	const localAttemptWorkerUrl = normalizeAttemptWorkerBaseUrl(
+		c.env.LOCAL_ATTEMPT_WORKER_URL,
+	);
 	const binding = c.env.ATTEMPT_WORKER;
-	if (!binding || state.forceLocalDirect || input.attempts.length === 0) {
+	if (
+		state.forceLocalDirect ||
+		input.attempts.length === 0 ||
+		(!localAttemptWorkerUrl && !binding)
+	) {
 		return null;
 	}
 	try {
-		const response = await binding.fetch(
-			"https://attempt-worker/internal/attempt/dispatch",
-			{
-				method: "POST",
-				headers: {
-					"content-type": "application/json",
-				},
-				body: JSON.stringify(input),
+		const requestInit: RequestInit = {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
 			},
+			body: JSON.stringify(input),
+		};
+		const response = localAttemptWorkerUrl
+			? await fetchWithTimeoutLocal(
+					`${localAttemptWorkerUrl}/internal/attempt/dispatch`,
+					requestInit,
+					0,
+				)
+			: await binding!.fetch(
+					"https://attempt-worker/internal/attempt/dispatch",
+					{
+						method: "POST",
+						headers: {
+							"content-type": "application/json",
+						},
+						body: JSON.stringify(input),
+					},
+				);
+		const attemptWorkerError = await parseAttemptWorkerErrorResponse(
+			response as unknown as Response,
+			localAttemptWorkerUrl ? "local_http" : "binding",
+			started,
 		);
+		if (attemptWorkerError) {
+			if (!policy.fallbackEnabled) {
+				return attemptWorkerError;
+			}
+			registerAttemptWorkerTransportFailure(policy, state);
+			return null;
+		}
 		const firstAttempt = input.attempts[0];
 		const fallbackIndex = Math.max(0, input.attempts.length - 1);
 		const attemptIndex =
@@ -2357,10 +2536,7 @@ async function executeDispatchViaWorker(
 				latencyMs: Date.now() - started,
 			};
 		}
-		state.bindingFailureCount += 1;
-		if (state.bindingFailureCount >= policy.fallbackThreshold) {
-			state.forceLocalDirect = true;
-		}
+		registerAttemptWorkerTransportFailure(policy, state);
 		return null;
 	}
 }
@@ -2449,6 +2625,10 @@ proxy.all("/*", tokenAuth, async (c) => {
 		forceLocalDirect: false,
 		bindingFailureCount: 0,
 	};
+	const attemptWorkerAvailable = Boolean(
+		normalizeAttemptWorkerBaseUrl(c.env.LOCAL_ATTEMPT_WORKER_URL) ??
+			c.env.ATTEMPT_WORKER,
+	);
 	const requestPath = normalizeIncomingRequestPath(c.req.path).path;
 	let downstreamProvider: ProviderType;
 	let endpointType: EndpointType;
@@ -2476,7 +2656,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 	);
 	const requestText = await c.req.text();
 	const offloadDecision = resolveLargeRequestOffload({
-		attemptWorkerAvailable: Boolean(c.env.ATTEMPT_WORKER),
+		attemptWorkerAvailable,
 		thresholdBytes: offloadThresholdBytes,
 		contentLengthHeader: c.req.header("content-length") ?? null,
 	});
@@ -2485,7 +2665,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 		: requestText.length;
 	const shouldTryLargeRequestDispatch = offloadDecision.requestSizeKnown
 		? offloadDecision.shouldOffload
-		: Boolean(c.env.ATTEMPT_WORKER) &&
+		: attemptWorkerAvailable &&
 			(offloadThresholdBytes === 0 ||
 				requestSizeBytes >= offloadThresholdBytes);
 	const shouldSkipHeavyBodyParsing = shouldTryLargeRequestDispatch;
@@ -3140,11 +3320,33 @@ proxy.all("/*", tokenAuth, async (c) => {
 	let selectedAttemptUpstreamRequestId: string | null = null;
 	let lastErrorDetails: ErrorDetails | null = null;
 	let attemptsExecuted = 0;
-	const parseStreamUsageOnFailure = async (_response: Response) => {
-		return {
-			usage: null as NormalizedUsage | null,
-			usageSource: "none" as const,
-		};
+	const parseStreamUsageOnFailure = async (response: Response) => {
+		if (
+			!isStream ||
+			!shouldParseFailureStreamUsage(streamUsageMode as "full" | "lite" | "off")
+		) {
+			return {
+				usage: null as NormalizedUsage | null,
+				usageSource: "none" as const,
+			};
+		}
+		try {
+			const streamUsage = await parseUsageFromSse(response.clone(), {
+				...streamUsageOptions,
+				timeoutMs: streamUsageParseTimeoutMs,
+			});
+			return {
+				usage: streamUsage.usage,
+				usageSource: streamUsage.usage
+					? ("stream" as const)
+					: ("none" as const),
+			};
+		} catch {
+			return {
+				usage: null as NormalizedUsage | null,
+				usageSource: "none" as const,
+			};
+		}
 	};
 	const attemptFailures: AttemptFailureDetail[] = [];
 	const appendAttemptFailure = (options: {
@@ -3486,6 +3688,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 				timeoutMs: upstreamTimeoutMs,
 				responsePath: upstreamRequestPath,
 				fallbackPath: upstreamFallbackPath,
+				streamUsage: streamUsageOptions,
 				streamOptionsInjected,
 				strippedBodyText: strippedStreamOptionsBodyText,
 			});
@@ -3504,6 +3707,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 				{
 					attempts: dispatchAttempts,
 					retryConfig: dispatchRetryConfig,
+					streamUsage: streamUsageOptions,
 				},
 				attemptBindingPolicy,
 				attemptBindingState,
@@ -3520,6 +3724,28 @@ proxy.all("/*", tokenAuth, async (c) => {
 						type: "attempt_worker_binding_error",
 						latency_ms: dispatchResult.latencyMs,
 					}),
+				});
+				return jsonErrorWithTrace(
+					503,
+					dispatchResult.errorCode,
+					dispatchResult.errorCode,
+				);
+			}
+			if (dispatchResult?.kind === "attempt_worker_error") {
+				recordEarlyUsage({
+					status: 503,
+					code: dispatchResult.errorCode,
+					message: dispatchResult.errorMessage,
+					failureStage: "attempt_dispatch_worker",
+					failureReason: dispatchResult.errorCode,
+					usageSource: "none",
+					errorMetaJson:
+						dispatchResult.errorMetaJson ??
+						JSON.stringify({
+							type: "attempt_worker_internal_error",
+							http_status: dispatchResult.httpStatus,
+							latency_ms: dispatchResult.latencyMs,
+						}),
 				});
 				return jsonErrorWithTrace(
 					503,
@@ -4124,19 +4350,32 @@ proxy.all("/*", tokenAuth, async (c) => {
 						timeoutMs: upstreamTimeoutMs,
 						responsePath: upstreamRequestPath,
 						fallbackPath: upstreamFallbackPath,
+						streamUsage: streamUsageOptions,
 					},
 					attemptBindingPolicy,
 					attemptBindingState,
 				);
-				if (attemptResult.kind === "binding_error") {
+				if (
+					attemptResult.kind === "binding_error" ||
+					attemptResult.kind === "attempt_worker_error"
+				) {
+					const errorMetaJson =
+						attemptResult.kind === "attempt_worker_error"
+							? (attemptResult.errorMetaJson ??
+								JSON.stringify({
+									type: "attempt_worker_internal_error",
+									http_status: attemptResult.httpStatus,
+									latency_ms: attemptResult.latencyMs,
+								}))
+							: JSON.stringify({
+									type: "attempt_worker_binding_error",
+									latency_ms: attemptResult.latencyMs,
+								});
 					lastErrorDetails = {
 						upstreamStatus: null,
 						errorCode: attemptResult.errorCode,
 						errorMessage: attemptResult.errorMessage,
-						errorMetaJson: JSON.stringify({
-							type: "attempt_worker_binding_error",
-							latency_ms: attemptResult.latencyMs,
-						}),
+						errorMetaJson,
 					};
 					recordAttemptUsage({
 						channelId: channel.id,
@@ -4159,9 +4398,15 @@ proxy.all("/*", tokenAuth, async (c) => {
 						provider: upstreamProvider,
 						model: upstreamModel ?? downstreamModel,
 						status: "error",
-						errorClass: "attempt_binding",
+						errorClass:
+							attemptResult.kind === "attempt_worker_error"
+								? "attempt_worker"
+								: "attempt_binding",
 						errorCode: attemptResult.errorCode,
-						httpStatus: null,
+						httpStatus:
+							attemptResult.kind === "attempt_worker_error"
+								? attemptResult.httpStatus
+								: null,
 						latencyMs: attemptResult.latencyMs,
 						startedAt: attemptStartedAt,
 						endedAt: new Date().toISOString(),
@@ -4169,7 +4414,10 @@ proxy.all("/*", tokenAuth, async (c) => {
 					appendAttemptFailure({
 						attemptIndex: attemptNumber,
 						channel,
-						httpStatus: null,
+						httpStatus:
+							attemptResult.kind === "attempt_worker_error"
+								? attemptResult.httpStatus
+								: null,
 						errorCode: attemptResult.errorCode,
 						errorMessage: attemptResult.errorMessage,
 						latencyMs: attemptResult.latencyMs,
@@ -4211,19 +4459,32 @@ proxy.all("/*", tokenAuth, async (c) => {
 								timeoutMs: upstreamTimeoutMs,
 								responsePath: upstreamRequestPath,
 								fallbackPath: upstreamFallbackPath,
+								streamUsage: streamUsageOptions,
 							},
 							attemptBindingPolicy,
 							attemptBindingState,
 						);
-						if (retried.kind === "binding_error") {
+						if (
+							retried.kind === "binding_error" ||
+							retried.kind === "attempt_worker_error"
+						) {
+							const errorMetaJson =
+								retried.kind === "attempt_worker_error"
+									? (retried.errorMetaJson ??
+										JSON.stringify({
+											type: "attempt_worker_internal_error",
+											http_status: retried.httpStatus,
+											latency_ms: retried.latencyMs,
+										}))
+									: JSON.stringify({
+											type: "attempt_worker_binding_error",
+											latency_ms: retried.latencyMs,
+										});
 							lastErrorDetails = {
 								upstreamStatus: null,
 								errorCode: retried.errorCode,
 								errorMessage: retried.errorMessage,
-								errorMetaJson: JSON.stringify({
-									type: "attempt_worker_binding_error",
-									latency_ms: retried.latencyMs,
-								}),
+								errorMetaJson,
 							};
 							recordAttemptUsage({
 								channelId: channel.id,
@@ -4246,9 +4507,15 @@ proxy.all("/*", tokenAuth, async (c) => {
 								provider: upstreamProvider,
 								model: upstreamModel ?? downstreamModel,
 								status: "error",
-								errorClass: "attempt_binding",
+								errorClass:
+									retried.kind === "attempt_worker_error"
+										? "attempt_worker"
+										: "attempt_binding",
 								errorCode: retried.errorCode,
-								httpStatus: null,
+								httpStatus:
+									retried.kind === "attempt_worker_error"
+										? retried.httpStatus
+										: null,
 								latencyMs: retried.latencyMs,
 								startedAt: attemptStartedAt,
 								endedAt: new Date().toISOString(),
@@ -4256,7 +4523,10 @@ proxy.all("/*", tokenAuth, async (c) => {
 							appendAttemptFailure({
 								attemptIndex: attemptNumber,
 								channel,
-								httpStatus: null,
+								httpStatus:
+									retried.kind === "attempt_worker_error"
+										? retried.httpStatus
+										: null,
 								errorCode: retried.errorCode,
 								errorMessage: retried.errorMessage,
 								latencyMs: retried.latencyMs,
@@ -4796,26 +5066,75 @@ proxy.all("/*", tokenAuth, async (c) => {
 		const streamUsageProcessed = parseBooleanHeader(
 			selectedResponse.headers.get(ATTEMPT_STREAM_USAGE_PROCESSED_HEADER),
 		);
-		const usageSource = selectedImmediateUsage ? "header" : "none";
-		const streamMetaPartial = streamUsageProcessed
-			? parseBooleanHeader(
-					selectedResponse.headers.get(ATTEMPT_STREAM_META_PARTIAL_HEADER),
-				)
-			: false;
-		const firstTokenLatencyMs = streamUsageProcessed
-			? parseOptionalLatencyHeader(
-					selectedResponse.headers.get(
-						ATTEMPT_STREAM_FIRST_TOKEN_LATENCY_HEADER,
-					),
-				)
-			: null;
-		if (streamMetaPartial) {
-			const streamMetaReason =
+		let usage = selectedImmediateUsage;
+		let usageSource: "header" | "stream" | "none" = selectedImmediateUsage
+			? "header"
+			: "none";
+		let streamMetaPartial = false;
+		let streamMetaReason: string | null = null;
+		let firstTokenLatencyMs: number | null = null;
+		if (streamUsageProcessed) {
+			streamMetaPartial = parseBooleanHeader(
+				selectedResponse.headers.get(ATTEMPT_STREAM_META_PARTIAL_HEADER),
+			);
+			streamMetaReason =
 				normalizeMessage(
 					selectedResponse.headers.get(ATTEMPT_STREAM_META_REASON_HEADER),
-				) ?? STREAM_META_PARTIAL_CODE;
+				) ?? null;
+			firstTokenLatencyMs = parseOptionalLatencyHeader(
+				selectedResponse.headers.get(ATTEMPT_STREAM_FIRST_TOKEN_LATENCY_HEADER),
+			);
+		} else if (
+			shouldParseSuccessStreamUsage(streamUsageMode as "full" | "lite" | "off")
+		) {
+			try {
+				const streamUsage = await parseUsageFromSse(selectedResponse.clone(), {
+					...streamUsageOptions,
+					timeoutMs: streamUsageParseTimeoutMs,
+				});
+				if (streamUsage.usage) {
+					usage = streamUsage.usage;
+					usageSource = "stream";
+				}
+				firstTokenLatencyMs = streamUsage.firstTokenLatencyMs;
+				streamMetaPartial = shouldMarkStreamMetaPartial({
+					mode: streamUsageMode as "full" | "lite" | "off",
+					hasImmediateUsage: Boolean(selectedImmediateUsage),
+					hasParsedUsage: Boolean(streamUsage.usage),
+					eventsSeen: streamUsage.eventsSeen,
+				});
+				if (streamMetaPartial) {
+					streamMetaReason = resolveStreamMetaPartialReason({
+						mode: streamUsageMode as "full" | "lite" | "off",
+						timedOut: streamUsage.timedOut,
+						eventsSeen: streamUsage.eventsSeen,
+					});
+				}
+			} catch {
+				streamMetaPartial = !selectedImmediateUsage;
+				if (streamMetaPartial) {
+					streamMetaReason = resolveStreamMetaPartialReason({
+						mode: streamUsageMode as "full" | "lite" | "off",
+						timedOut: true,
+					});
+				}
+			}
+		} else {
+			streamMetaPartial = shouldMarkStreamMetaPartial({
+				mode: streamUsageMode as "full" | "lite" | "off",
+				hasImmediateUsage: Boolean(selectedImmediateUsage),
+				hasParsedUsage: false,
+			});
+			if (streamMetaPartial) {
+				streamMetaReason = resolveStreamMetaPartialReason({
+					mode: streamUsageMode as "full" | "lite" | "off",
+				});
+			}
+		}
+		if (streamMetaPartial) {
+			const reason = streamMetaReason ?? STREAM_META_PARTIAL_CODE;
 			markStreamMetaPartial({
-				reason: streamMetaReason,
+				reason,
 				path: selectedRequestPath,
 				eventsSeen: 0,
 				hasImmediateUsage: Boolean(selectedImmediateUsage),
@@ -4847,7 +5166,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 			requestPath: selectedRequestPath,
 			latencyMs: selectedLatencyMs,
 			firstTokenLatencyMs,
-			usage: selectedImmediateUsage,
+			usage,
 			status: streamMetaPartial ? "warn" : "ok",
 			upstreamStatus: selectedResponse.status,
 			errorCode: streamMetaPartial ? STREAM_META_PARTIAL_CODE : null,

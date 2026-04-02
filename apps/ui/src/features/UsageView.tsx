@@ -554,11 +554,7 @@ export const UsageView = ({
 														>
 															<Chip
 																class="text-[10px]"
-																variant={
-																	log.status === "ok" && !log.error_code
-																		? "success"
-																		: "danger"
-																}
+																variant={statusDetail.tone}
 															>
 																{statusDetail.label}
 															</Chip>
