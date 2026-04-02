@@ -1,3 +1,5 @@
+> cpu limit 我没辙了 本地部署吧
+
 # api-worker
 
 Cloudflare Workers + D1 的 API 网关与管理台一体化项目。
@@ -141,6 +143,14 @@ bun run dev -- [可选参数]
 - 查看后台状态：`bun run dev -- --status`
 - 停止后台实例：`bun run dev -- --stop`
 
+自启动脚本（Windows）：
+
+- 交互式配置：`bun run autostart`
+- 开启自启动：`bun run autostart -- enable [dev 参数，空格分隔]`
+- 关闭自启动：`bun run autostart -- disable`
+- 查看状态：`bun run autostart -- status`
+- 示例：`bun run autostart -- enable --no-attempt-worker --cloud-db --no-ui`
+
 快捷命令（仅主 Worker + 禁用热缓存）：
 
 - 默认先构建 UI 后启动：`bun run dev:worker`
@@ -167,6 +177,12 @@ bun --filter api-worker-ui dev -- --port 4173
 - Attempt Worker: `8788`
 - UI: `4173`
 
+支持环境变量覆盖（`bun run dev` 生效）：
+
+- `DEV_PORT` / `DEV_WORKER_PORT`：主 Worker 端口（默认 `8787`）
+- `DEV_ATTEMPT_WORKER_PORT`：调用执行器端口（默认 `8788`）
+- `DEV_UI_PORT`：UI 端口（默认 `4173`）
+
 ### 4) 首次本地迁移（推荐）
 
 ```bash
@@ -192,6 +208,7 @@ cp .env.example .env
 bun run prepare:remote-config
 bun run db:migrate:remote
 bun run dev -- --cloud-db
+bun run autostart -- status
 ```
 
 说明：

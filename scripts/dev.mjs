@@ -52,6 +52,32 @@ const skipUi = rawArgs.includes("--no-ui");
 const buildUi = rawArgs.includes("--build-ui");
 const skipUiBuild = rawArgs.includes("--skip-ui-build");
 
+const parsePortFromEnv = (name, fallback) => {
+	const raw = process.env[name];
+	if (!raw || raw.trim().length === 0) {
+		return fallback;
+	}
+	const value = Number(raw);
+	if (!Number.isInteger(value) || value < 1 || value > 65535) {
+		throw new Error(
+			`环境变量 ${name} 端口非法（${raw}），需为 1-65535 的整数。`,
+		);
+	}
+	return value;
+};
+
+const workerPort = parsePortFromEnv(
+	"DEV_WORKER_PORT",
+	parsePortFromEnv("DEV_PORT", 8787),
+);
+const attemptWorkerPort = parsePortFromEnv("DEV_ATTEMPT_WORKER_PORT", 8788);
+const uiPort = parsePortFromEnv("DEV_UI_PORT", 4173);
+const workerInspectorPort = parsePortFromEnv("DEV_WORKER_INSPECTOR_PORT", 9229);
+const attemptInspectorPort = parsePortFromEnv(
+	"DEV_ATTEMPT_INSPECTOR_PORT",
+	9230,
+);
+
 const children = new Map();
 let shuttingDown = false;
 
@@ -223,32 +249,53 @@ const prepareUiBuild = async () => {
 const buildCommands = () => {
 	const commands = [];
 	if (!skipAttemptWorker) {
+		const attemptWranglerArgs = ["dev", "--port", String(attemptWorkerPort)];
+		if (isRemote) {
+			attemptWranglerArgs.push("--remote", "--config", ".wrangler.remote.toml");
+		}
+		attemptWranglerArgs.push("--inspector-port", String(attemptInspectorPort));
 		commands.push({
 			name: "attempt-worker",
 			cmd: BUN_CMD,
-			args: ["--cwd", "apps/attempt-worker", isRemote ? "dev:remote" : "dev"],
+			args: [
+				"--cwd",
+				"apps/attempt-worker",
+				"x",
+				"wrangler",
+				...attemptWranglerArgs,
+			],
 		});
 	}
+	const workerWranglerArgs = ["dev", "--port", String(workerPort)];
+	if (isRemote) {
+		workerWranglerArgs.push("--remote");
+		workerWranglerArgs.push(
+			"--config",
+			disableHotCache
+				? ".wrangler.remote.no-hot-cache.toml"
+				: ".wrangler.remote.toml",
+		);
+	} else if (disableHotCache) {
+		workerWranglerArgs.push("--config", ".wrangler.local.no-hot-cache.toml");
+	}
+	workerWranglerArgs.push("--inspector-port", String(workerInspectorPort));
 	commands.push({
 		name: "worker",
 		cmd: BUN_CMD,
-		args: [
-			"--cwd",
-			"apps/worker",
-			isRemote
-				? disableHotCache
-					? "dev:remote:no-hot-cache"
-					: "dev:remote"
-				: disableHotCache
-					? "dev:no-hot-cache"
-					: "dev",
-		],
+		args: ["--cwd", "apps/worker", "x", "wrangler", ...workerWranglerArgs],
 	});
 	if (!skipUi) {
 		commands.push({
 			name: "ui",
 			cmd: BUN_CMD,
-			args: ["--filter", "api-worker-ui", "dev", "--", "--port", "4173"],
+			args: [
+				"--filter",
+				"api-worker-ui",
+				"dev",
+				"--",
+				"--port",
+				String(uiPort),
+			],
 		});
 	}
 	return commands;

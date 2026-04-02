@@ -10,6 +10,7 @@
 		"prepare:no-hot-cache-config": "node scripts/prepare-no-hot-cache-config.mjs",
 		"build:ui": "bun --filter api-worker-ui build",
 		"dev": "node scripts/dev.mjs",
+		"autostart": "node scripts/autostart.mjs",
 		"dev:worker": "node scripts/dev.mjs --no-attempt-worker --no-ui --no-hot-cache --build-ui",
 		"deploy": "node scripts/deploy.mjs update --target both",
 		"deploy:init": "node scripts/deploy.mjs init",
