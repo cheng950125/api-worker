@@ -21,7 +21,7 @@
 - 失败冷却/阈值判断不做跨请求缓存，确保即时生效
 - 支持从非流式 JSON、响应头与流式 SSE（含 `response.usage` 与 `usageMetadata`）解析 usage 字段
 - 流式请求自动补 `stream_options.include_usage=true` 以便上游返回 usage
-- 流式 usage 解析支持 `full/lite/off` 模式（`lite` 仅解析包含 usage 的事件，并可限制最大扫描字节）
+- 流式 usage 解析支持 `full/lite/off` 模式（`lite` 仅解析包含 usage 的事件；解析过程不再按固定字节数截断，主要受超时与并发上限控制）
 - 对 `/v1/responses` 且上游返回 400/404 时回退为 `/responses` 重试一次
 - 可配置失败重试轮询（响应 5xx/429 时触发）
 - 记录流式请求标记、首 token 延迟与推理强度到 usage_logs
@@ -43,10 +43,10 @@
 - 映射模型场景失败时同时记录下游模型错误，确保冷却窗口生效
 - 上游成功响应会刷新能力表，清空错误并延长可用窗口
 - 运行时配置优先读取 settings，环境变量仅回退
-- CPU 保护相关配置: `proxy_stream_usage_mode`, `proxy_stream_usage_max_bytes`, `proxy_stream_usage_max_parsers`, `proxy_usage_queue_enabled`
+- CPU 保护相关配置: `proxy_stream_usage_mode`, `proxy_stream_usage_max_parsers`, `proxy_usage_queue_enabled`
 - 队列策略配置: `usage_queue_daily_limit`, `usage_queue_direct_write_ratio`
-- 默认值: `PROXY_STREAM_USAGE_MODE=full`, `PROXY_STREAM_USAGE_MAX_BYTES=0`, `PROXY_STREAM_USAGE_MAX_PARSERS=0`, `PROXY_USAGE_QUEUE_ENABLED=true`
-- `PROXY_STREAM_USAGE_MAX_BYTES` 与 `PROXY_STREAM_USAGE_MAX_PARSERS` 设为 `0` 表示无限制
+- 默认值: `PROXY_STREAM_USAGE_MODE=full`, `PROXY_STREAM_USAGE_MAX_PARSERS=0`, `PROXY_USAGE_QUEUE_ENABLED=true`
+- `PROXY_STREAM_USAGE_MAX_PARSERS` 设为 `0` 表示无限制
 
 ## 依赖关系
 - `channels` / `tokens` / `usage_logs` 表

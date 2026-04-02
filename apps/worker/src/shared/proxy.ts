@@ -193,7 +193,6 @@ const WEIGHTED_ORDER_FAILED_CODE = "weighted_order_failed";
 const RESPONSE_ADAPT_FAILED_CODE = "response_adapt_failed";
 const STREAM_META_PARTIAL_CODE = "stream_meta_partial";
 const STREAM_META_PARTIAL_BIZ_STATUS = "29011";
-const DEFAULT_STREAM_USAGE_PARSE_MAX_BYTES = 96 * 1024;
 
 let activeStreamUsageParsers = 0;
 
@@ -1527,7 +1526,6 @@ function getStreamUsageOptions(settings: {
 			0,
 			Math.floor(Number(settings.stream_usage_parse_timeout_ms ?? 0)),
 		),
-		maxBytes: DEFAULT_STREAM_USAGE_PARSE_MAX_BYTES,
 	};
 }
 

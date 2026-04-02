@@ -8,6 +8,11 @@
   - 方案: [202604022339_startup-runtime-hardening](archive/2026-04/202604022339_startup-runtime-hardening/)
   - 决策: startup-runtime-hardening#D001(Windows 自启动改用计划任务), startup-runtime-hardening#D002(运行时配置与日志统一收敛到 .dev)
 
+### 修复
+
+- **[proxy/usage]**: 删除 stream usage 旁路解析的固定 `maxBytes` 截断，避免长 Responses 流在尾部 usage 到达前被误记为 `stream_meta_partial` — by lsy
+  - 方案: [202604030046_remove-stream-usage-maxbytes](archive/2026-04/202604030046_remove-stream-usage-maxbytes/)
+
 ### 快速修改
 
 - **[tooling]**: 修复计划任务直接执行 `bun.exe` 仍可能弹出控制台窗口，改为隐藏 PowerShell 启动器包裹 `bun run dev -- --bg` — by lsy

@@ -25,7 +25,6 @@ export type StreamUsageMode = "full" | "lite" | "off";
 
 export type StreamUsageOptions = {
 	mode?: StreamUsageMode;
-	maxBytes?: number;
 	timeoutMs?: number;
 };
 
@@ -164,10 +163,6 @@ export async function parseUsageFromSse(
 	if (mode === "off") {
 		return { usage: null, firstTokenLatencyMs: null, timedOut: false };
 	}
-	const maxBytes =
-		typeof options.maxBytes === "number" && options.maxBytes > 0
-			? options.maxBytes
-			: Number.POSITIVE_INFINITY;
 	const reader = response.body.getReader();
 	const timeoutMs =
 		typeof options.timeoutMs === "number" && options.timeoutMs > 0
@@ -238,10 +233,6 @@ export async function parseUsageFromSse(
 			break;
 		}
 		bytesRead += value?.byteLength ?? 0;
-		if (bytesRead > maxBytes) {
-			await reader.cancel();
-			break;
-		}
 		buffer += decoder.decode(value, { stream: true });
 		let newlineIndex = buffer.indexOf("\n");
 		while (newlineIndex !== -1) {

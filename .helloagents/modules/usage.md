@@ -12,7 +12,7 @@
 - 代理调用统一写入 `usage_logs`（含无可用渠道/冷却提前返回）
 - 使用日志可通过 `USAGE_QUEUE` 异步写入（可能存在短暂延迟）
 - 队列写入受 `usage_queue_daily_limit` 限制，超限后自动回退为 Worker 直写
-- 流式 usage 解析被跳过或超限时会记录 `usage_skipped/usage_missing` 以便排查
+- 流式 usage 解析被跳过、超时或缺失时会记录 `usage_skipped/usage_missing` 以便排查
 - 保留天数可配置，查询时触发清理
 - `GET /api/usage` 支持短时缓存（TTL 可配置，版本化失效）
 - 查询结果附带渠道与令牌名称

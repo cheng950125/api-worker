@@ -33,7 +33,6 @@ const DISPATCH_STOP_RETRY_HEADER = "x-ha-dispatch-stop-retry";
 const STREAM_OPTIONS_UNSUPPORTED_SNIPPET = "unsupported parameter";
 const STREAM_OPTIONS_PARAM_NAME = "stream_options";
 const ATTEMPT_STREAM_USAGE_PARSE_TIMEOUT_MS = 1200;
-const ATTEMPT_STREAM_USAGE_MAX_BYTES = 96 * 1024;
 const ATTEMPT_RESPONSE_ID_PARSE_TIMEOUT_MS = 1200;
 const ATTEMPT_RESPONSE_ID_PARSE_MAX_BYTES = 64 * 1024;
 
@@ -516,7 +515,6 @@ async function collectAttemptStreamMeta(
 			mode,
 			timeoutMs:
 				streamUsage?.timeoutMs ?? ATTEMPT_STREAM_USAGE_PARSE_TIMEOUT_MS,
-			maxBytes: streamUsage?.maxBytes ?? ATTEMPT_STREAM_USAGE_MAX_BYTES,
 		}).catch(() => null);
 		if (parsedStreamUsage) {
 			usage = parsedStreamUsage.usage;
