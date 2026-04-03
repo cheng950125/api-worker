@@ -29,6 +29,12 @@
 **结果**: 自启动不再依赖 Startup `.cmd`
 **补充**: 登录后实际运行的后台守护分支仍沿用 `scripts/dev.mjs` 的隐藏窗口与日志重定向策略；`status` / `disable` 通过 PowerShell ScheduledTasks API 查询与删除同名任务
 
+### Linux 自启动
+**条件**: 在启用 `systemd --user` 的 Linux 环境执行 `bun run autostart -- enable ...`
+**行为**: `scripts/autostart.mjs` 生成 `~/.config/systemd/user/api-worker-dev-autostart.service`，并通过 `systemctl --user daemon-reload` + `enable --now` 注册登录后自动启动
+**结果**: Linux 开发环境可复用同一条 `bun run autostart` 命令配置用户级自启动
+**补充**: `status` / `disable` 分别通过 `systemctl --user show` 与 `disable --now` 查询和移除同名 service；实际启动命令仍为 `bun run dev -- --bg`
+
 ## 依赖关系
 
 ```yaml

@@ -1,70 +1,32 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 
+import {
+	autostartTaskName,
+	backgroundLogModeOptions,
+	buildInteractiveEnableArgs,
+	buildLinuxAutostartUnit,
+	buildTaskArguments,
+	encodePowerShellCommand,
+	escapeForSingleQuotedPowerShell,
+	getLinuxAutostartPaths,
+	interactiveEnableOptions,
+	linuxAutostartServiceName,
+	parseBackgroundLogModeArgs,
+	parseSystemctlShowOutput,
+	parseUiBuildModeArgs,
+	uiBuildModeOptions,
+} from "./autostart-shared.mjs";
+
 const rawArgs = process.argv.slice(2);
 const action = rawArgs[0]?.trim().toLowerCase() ?? "interactive";
 const devArgs = rawArgs.slice(1);
-
-const autostartTaskName = "api-worker-dev-autostart";
 const repoRoot = process.cwd();
-
-const interactiveEnableOptions = [
-	{ flag: "--no-ui", label: "关闭热加载 UI" },
-	{ flag: "--no-attempt-worker", label: "不启动调用执行器 attempt-worker" },
-	{ flag: "--no-hot-cache", label: "禁用热缓存 KV_HOT" },
-	{ flag: "--remote-d1", label: "连接云端 D1/KV（执行仍在本地）" },
-	{ flag: "--remote-worker", label: "主 worker / attempt-worker 走远端预览" },
-];
-
-const uiBuildModeOptions = [
-	{ mode: "1", label: "构建 UI（--build-ui）", flags: ["--build-ui"] },
-	{
-		mode: "2",
-		label: "跳过 UI 预构建（--skip-ui-build）",
-		flags: ["--skip-ui-build"],
-	},
-];
-
-const backgroundLogModeOptions = [
-	{ mode: "1", label: "写入日志文件（默认）", flags: [] },
-	{
-		mode: "2",
-		label: "关闭后台日志（--log-mode none）",
-		flags: ["--log-mode", "none"],
-	},
-];
-
-const escapeForSingleQuotedPowerShell = (value) =>
-	String(value).replace(/'/g, "''");
-
-const quoteWindowsArgument = (arg) => {
-	const text = String(arg);
-	if (text.length === 0) {
-		return '""';
-	}
-	if (!/[\s"]/u.test(text)) {
-		return text;
-	}
-	return `"${text.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/g, "$1$1")}"`;
-};
-
-const normalizeDevArgs = (args) =>
-	args
-		.filter(Boolean)
-		.map((item) => item.trim())
-		.filter((item) => item.length > 0 && item !== "--bg");
-
-const buildTaskArguments = (args) => {
-	const normalizedArgs = normalizeDevArgs(args);
-	return ["run", "dev", "--", ...normalizedArgs, "--bg"];
-};
-
-const encodePowerShellCommand = (script) =>
-	Buffer.from(script, "utf16le").toString("base64");
 
 const resolveBunCommand = () => {
 	if (process.env.BUN_BIN && existsSync(process.env.BUN_BIN)) {
@@ -112,79 +74,40 @@ const printUsage = () => {
 	console.log("  bun run autostart -- status");
 };
 
-const parseInteractiveSelection = (raw, maxIndex) => {
-	const text = String(raw ?? "").trim();
-	if (text.length === 0) {
-		return [];
-	}
-	const parts = text
-		.split(/[\s,，、]+/u)
-		.map((item) => item.trim())
-		.filter(Boolean);
-	const numbers = [];
-	for (const part of parts) {
-		const value = Number(part);
-		if (!Number.isInteger(value) || value < 1 || value > maxIndex) {
-			throw new Error(
-				`无效编号 "${part}"，请输入 1-${maxIndex} 之间的数字，可用空格分隔。`,
-			);
-		}
-		if (!numbers.includes(value)) {
-			numbers.push(value);
-		}
-	}
-	return numbers;
-};
-
-const buildInteractiveEnableArgs = (selection) =>
-	parseInteractiveSelection(selection, interactiveEnableOptions.length).map(
-		(index) => interactiveEnableOptions[index - 1].flag,
-	);
-
-const parseUiBuildModeArgs = (selection) => {
-	const mode = String(selection ?? "").trim();
-	if (mode.length === 0) {
-		return ["--skip-ui-build"];
-	}
-	const matched = uiBuildModeOptions.find((item) => item.mode === mode);
-	if (!matched) {
-		throw new Error("UI 预构建策略无效，请输入 1 / 2。");
-	}
-	return matched.flags;
-};
-
-const parseBackgroundLogModeArgs = (selection) => {
-	const mode = String(selection ?? "").trim();
-	if (mode.length === 0) {
-		return [];
-	}
-	const matched = backgroundLogModeOptions.find((item) => item.mode === mode);
-	if (!matched) {
-		throw new Error("后台日志策略无效，请输入 1 / 2。");
-	}
-	return matched.flags;
-};
-
 const ensureWindows = () => {
 	if (process.platform !== "win32") {
-		throw new Error("当前仅支持 Windows 自启动脚本。");
+		throw new Error("当前不是 Windows 环境。");
 	}
+};
+
+const ensureLinux = () => {
+	if (process.platform !== "linux") {
+		throw new Error("当前不是 Linux 环境。");
+	}
+};
+
+const runCommand = (command, args, fallbackMessage, options = {}) => {
+	const result = spawnSync(command, args, { encoding: "utf8" });
+	if (result.error) {
+		if (options.allowFailure) {
+			return result;
+		}
+		throw result.error;
+	}
+	if (!options.allowFailure && result.status !== 0) {
+		const errorText = result.stderr?.trim() || result.stdout?.trim();
+		throw new Error(errorText || fallbackMessage);
+	}
+	return result;
 };
 
 const runPowerShell = (script) => {
-	const encodedCommand = Buffer.from(script, "utf16le").toString("base64");
-	const result = spawnSync(
+	const encodedCommand = encodePowerShellCommand(script);
+	const result = runCommand(
 		"powershell.exe",
 		["-NoProfile", "-NonInteractive", "-EncodedCommand", encodedCommand],
-		{ encoding: "utf8" },
+		"PowerShell 执行失败。",
 	);
-	if (result.error) {
-		throw result.error;
-	}
-	if (result.status !== 0) {
-		const errorText = result.stderr?.trim() || result.stdout?.trim();
-		throw new Error(errorText || "PowerShell 执行失败。");
-	}
 	return result.stdout.trim();
 };
 
@@ -196,12 +119,38 @@ const runPowerShellJson = (script) => {
 	return JSON.parse(stdout);
 };
 
+const runSystemctlUser = (args, options = {}) =>
+	runCommand(
+		"systemctl",
+		["--user", ...args],
+		"systemctl --user 执行失败。",
+		options,
+	);
+
+const ensureLinuxSystemdUser = () => {
+	ensureLinux();
+	const result = runSystemctlUser(["show-environment"], { allowFailure: true });
+	if (result.error?.code === "ENOENT") {
+		throw new Error(
+			"未找到 systemctl，当前 Linux 环境无法使用 systemd --user 自启动。",
+		);
+	}
+	if (result.error) {
+		throw result.error;
+	}
+	if (result.status !== 0) {
+		const errorText = result.stderr?.trim() || result.stdout?.trim();
+		throw new Error(
+			errorText || "当前 Linux 会话未启用 systemd --user，无法配置自启动。",
+		);
+	}
+};
+
 const buildScheduledTaskLauncher = (args) => {
 	const bunCommand = resolveBunCommand();
-	const taskArgs = buildTaskArguments(args);
 	const escapedBunCommand = escapeForSingleQuotedPowerShell(bunCommand);
 	const escapedRepoRoot = escapeForSingleQuotedPowerShell(repoRoot);
-	const argumentList = taskArgs
+	const argumentList = buildTaskArguments(args)
 		.map((item) => `'${escapeForSingleQuotedPowerShell(item)}'`)
 		.join(", ");
 	const hiddenLauncherScript = [
@@ -215,7 +164,7 @@ const buildScheduledTaskLauncher = (args) => {
 	};
 };
 
-const getAutostartTaskInfo = () => {
+const getWindowsAutostartInfo = () => {
 	ensureWindows();
 	const taskName = escapeForSingleQuotedPowerShell(autostartTaskName);
 	return runPowerShellJson(`
@@ -239,7 +188,7 @@ $action = $task.Actions | Select-Object -First 1
 `);
 };
 
-const enableAutostart = (args) => {
+const enableWindowsAutostart = (args) => {
 	ensureWindows();
 	const escapedTaskName = escapeForSingleQuotedPowerShell(autostartTaskName);
 	const launcher = buildScheduledTaskLauncher(args);
@@ -270,7 +219,7 @@ Register-ScheduledTask -TaskName '${escapedTaskName}' -Action $action -Trigger $
 	console.log(`工作目录: ${result.workingDirectory}`);
 };
 
-const disableAutostart = () => {
+const disableWindowsAutostart = () => {
 	ensureWindows();
 	const taskName = escapeForSingleQuotedPowerShell(autostartTaskName);
 	const result = runPowerShellJson(`
@@ -291,8 +240,8 @@ Unregister-ScheduledTask -TaskName '${taskName}' -Confirm:$false
 	console.log("ℹ️ 当前未开启自启动。");
 };
 
-const showStatus = () => {
-	const task = getAutostartTaskInfo();
+const printWindowsAutostartStatus = () => {
+	const task = getWindowsAutostartInfo();
 	if (!task?.enabled) {
 		console.log("ℹ️ 自启动状态：未开启。");
 		return;
@@ -303,6 +252,154 @@ const showStatus = () => {
 	console.log(`程序: ${task.execute}`);
 	console.log(`参数: ${task.arguments}`);
 	console.log(`工作目录: ${task.workingDirectory}`);
+};
+
+const getLinuxAutostartInfo = () => {
+	ensureLinuxSystemdUser();
+	const { servicePath } = getLinuxAutostartPaths(homedir());
+	if (!existsSync(servicePath)) {
+		return {
+			enabled: false,
+			installed: false,
+			serviceName: linuxAutostartServiceName,
+			servicePath,
+		};
+	}
+
+	const result = runSystemctlUser(
+		[
+			"show",
+			linuxAutostartServiceName,
+			"--no-pager",
+			"--property=LoadState,UnitFileState,ActiveState,SubState,FragmentPath",
+		],
+		{ allowFailure: true },
+	);
+	if (result.error) {
+		throw result.error;
+	}
+
+	const details = parseSystemctlShowOutput(result.stdout);
+	const unitFileState = details.UnitFileState ?? "unknown";
+	return {
+		enabled: unitFileState.startsWith("enabled"),
+		installed: true,
+		serviceName: linuxAutostartServiceName,
+		servicePath,
+		unitFileState,
+		activeState: details.ActiveState ?? "unknown",
+		subState: details.SubState ?? "unknown",
+		fragmentPath: details.FragmentPath || servicePath,
+	};
+};
+
+const enableLinuxAutostart = (args) => {
+	ensureLinuxSystemdUser();
+	const { userUnitDir, servicePath } = getLinuxAutostartPaths(homedir());
+	mkdirSync(userUnitDir, { recursive: true });
+
+	const bunCommand = resolveBunCommand();
+	writeFileSync(
+		servicePath,
+		buildLinuxAutostartUnit({ bunCommand, repoRoot, args }),
+		"utf8",
+	);
+
+	runSystemctlUser(["daemon-reload"]);
+	runSystemctlUser(["enable", "--now", linuxAutostartServiceName]);
+
+	console.log("✅ 已开启自启动。");
+	console.log(`systemd 用户服务: ${linuxAutostartServiceName}`);
+	console.log(`服务文件: ${servicePath}`);
+	console.log(`工作目录: ${repoRoot}`);
+	console.log(`命令: ${[bunCommand, ...buildTaskArguments(args)].join(" ")}`);
+};
+
+const disableLinuxAutostart = () => {
+	ensureLinuxSystemdUser();
+	const { servicePath } = getLinuxAutostartPaths(homedir());
+	const existed = existsSync(servicePath);
+	const disableResult = runSystemctlUser(
+		["disable", "--now", linuxAutostartServiceName],
+		{ allowFailure: true },
+	);
+
+	if (existsSync(servicePath)) {
+		rmSync(servicePath, { force: true });
+	}
+
+	runSystemctlUser(["daemon-reload"]);
+	runSystemctlUser(["reset-failed", linuxAutostartServiceName], {
+		allowFailure: true,
+	});
+
+	if (existed || disableResult.status === 0) {
+		console.log("✅ 已关闭自启动。");
+		console.log(`已移除 systemd 用户服务: ${linuxAutostartServiceName}`);
+		return;
+	}
+	console.log("ℹ️ 当前未开启自启动。");
+};
+
+const printLinuxAutostartStatus = () => {
+	const service = getLinuxAutostartInfo();
+	if (!service.installed) {
+		console.log("ℹ️ 自启动状态：未开启。");
+		console.log(`服务文件: ${service.servicePath}`);
+		return;
+	}
+
+	if (service.enabled) {
+		console.log("✅ 自启动状态：已开启。");
+	} else {
+		console.log("ℹ️ 自启动状态：已安装但未启用。");
+	}
+	console.log(`systemd 用户服务: ${service.serviceName}`);
+	console.log(`启用状态: ${service.unitFileState}`);
+	console.log(`当前状态: ${service.activeState}/${service.subState}`);
+	console.log(`服务文件: ${service.fragmentPath}`);
+};
+
+const enableAutostart = (args) => {
+	if (process.platform === "win32") {
+		enableWindowsAutostart(args);
+		return;
+	}
+	if (process.platform === "linux") {
+		enableLinuxAutostart(args);
+		return;
+	}
+	throw new Error(
+		"当前仅支持 Windows 计划任务或 Linux systemd --user 自启动。",
+	);
+};
+
+const disableAutostart = () => {
+	if (process.platform === "win32") {
+		disableWindowsAutostart();
+		return;
+	}
+	if (process.platform === "linux") {
+		disableLinuxAutostart();
+		return;
+	}
+	throw new Error(
+		"当前仅支持 Windows 计划任务或 Linux systemd --user 自启动。",
+	);
+};
+
+const showStatus = () => {
+	if (process.platform === "win32") {
+		printWindowsAutostartStatus();
+		return;
+	}
+	if (process.platform === "linux") {
+		printLinuxAutostartStatus();
+		return;
+	}
+	throw new Error(
+		"当前仅支持 Windows 计划任务或 Linux systemd --user 自启动。",
+	);
 };
 
 const runInteractive = async () => {
@@ -349,12 +446,11 @@ const runInteractive = async () => {
 					console.log(`${option.mode}. ${option.label}`);
 				}
 				const logMode = await rl.question("请选择后台日志策略（默认 1）: ");
-				const finalArgs = [
+				enableAutostart([
 					...args,
 					...uiBuildArgs,
 					...parseBackgroundLogModeArgs(logMode),
-				];
-				enableAutostart(finalArgs);
+				]);
 				return;
 			}
 			if (answer === "2") {

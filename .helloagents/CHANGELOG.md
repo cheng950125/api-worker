@@ -4,6 +4,10 @@
 
 ### 变更
 
+- **[tooling]**: `bun run autostart` 新增 Linux `systemd --user` 自启动支持，并保留 Windows 计划任务实现 — by openclaw
+  - 方案: [202604031311_linux-systemd-autostart](archive/2026-04/202604031311_linux-systemd-autostart/)
+  - 决策: linux-systemd-autostart#D001(Linux 自启动采用 systemd --user service)
+
 - **[tooling/docs]**: 统一本地启动运行时目录，Windows 自启动改为计划任务，并新增后台日志模式控制 — by lsy
   - 方案: [202604022339_startup-runtime-hardening](archive/2026-04/202604022339_startup-runtime-hardening/)
   - 决策: startup-runtime-hardening#D001(Windows 自启动改用计划任务), startup-runtime-hardening#D002(运行时配置与日志统一收敛到 .dev)
