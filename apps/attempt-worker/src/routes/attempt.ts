@@ -4,6 +4,7 @@ import {
 	normalizeProxyStreamUsageMode,
 	repairOpenAiToolCallChain,
 	resolveStreamMetaPartialReason,
+	sanitizeUpstreamRequestHeaders,
 	shouldMarkStreamMetaPartial,
 	shouldParseSuccessStreamUsage,
 	validateOpenAiToolCallChain,
@@ -633,12 +634,13 @@ async function executeSingleAttempt(
 	for (const [key, value] of body.headers ?? []) {
 		headers.set(key, value);
 	}
-	headers.delete("host");
-	headers.delete("content-length");
+	const sanitizedHeaders = sanitizeUpstreamRequestHeaders(headers);
+	sanitizedHeaders.delete("host");
+	sanitizedHeaders.delete("content-length");
 
 	const requestInit: RequestInit = {
 		method: body.method,
-		headers,
+		headers: sanitizedHeaders,
 		body: undefined,
 	};
 	let responsePath = body.responsePath?.trim() || body.target;

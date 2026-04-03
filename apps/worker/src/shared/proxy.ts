@@ -9,6 +9,7 @@ import {
 	repairOpenAiToolCallChain as repairOpenAiToolCallChainShared,
 	resolveLargeRequestOffload,
 	resolveStreamMetaPartialReason,
+	sanitizeUpstreamRequestHeaders,
 	shouldMarkStreamMetaPartial,
 	shouldParseFailureStreamUsage,
 	shouldParseSuccessStreamUsage,
@@ -231,19 +232,88 @@ function normalizeMessage(value: string | null): string | null {
 	return trimmed;
 }
 
-function truncateMessage(value: string, maxLength: number): string {
-	if (value.length <= maxLength) {
-		return value;
-	}
-	return `${value.slice(0, Math.max(1, maxLength - 1))}…`;
-}
-
 function normalizeSummaryDetail(value: string, maxLength: number): string {
-	const compact = value.replace(/\s+/g, " ").trim();
-	if (!compact) {
+	void maxLength;
+	const normalized = value.trim();
+	if (!normalized) {
 		return "-";
 	}
-	return truncateMessage(compact, maxLength);
+	return normalized;
+}
+
+function redactHeaderValue(key: string, value: string): string {
+	const normalizedKey = key.trim().toLowerCase();
+	if (
+		normalizedKey === "authorization" ||
+		normalizedKey === "x-api-key" ||
+		normalizedKey === "x-goog-api-key" ||
+		normalizedKey === "proxy-authorization"
+	) {
+		return "[redacted]";
+	}
+	return value;
+}
+
+function snapshotHeaders(headers: Headers): Record<string, string> {
+	const entries = Array.from(headers.entries()).sort(([left], [right]) =>
+		left.localeCompare(right),
+	);
+	return Object.fromEntries(
+		entries.map(([key, value]) => [key, redactHeaderValue(key, value)]),
+	);
+}
+
+function extractEmbeddedHttpStatus(text: string): {
+	statusLine: string | null;
+	statusCode: number | null;
+	statusText: string | null;
+} {
+	const match = text.match(
+		/^(HTTP\/\d+(?:\.\d+)?\s+(\d{3})(?:\s+([^\r\n]+))?)/m,
+	);
+	if (!match) {
+		return {
+			statusLine: null,
+			statusCode: null,
+			statusText: null,
+		};
+	}
+	const parsedStatus = Number(match[2] ?? "");
+	return {
+		statusLine: match[1] ?? null,
+		statusCode: Number.isInteger(parsedStatus) ? parsedStatus : null,
+		statusText: normalizeStringField(match[3] ?? null),
+	};
+}
+
+function mergeErrorMetaJson(
+	base: string | null | undefined,
+	extra: Record<string, unknown>,
+): string | null {
+	const parsedBase = safeJsonParse<Record<string, unknown> | null>(
+		base ?? "",
+		null,
+	);
+	const merged = {
+		...(parsedBase ?? {}),
+		...extra,
+	};
+	return stringifyErrorMeta(merged);
+}
+
+function buildUpstreamDiagnosticMeta(options: {
+	target: string;
+	fallbackTarget?: string;
+	requestHeaders: Headers;
+	response: Response;
+}): Record<string, unknown> {
+	return {
+		upstream_target: options.target,
+		upstream_fallback_target: options.fallbackTarget ?? null,
+		request_headers: snapshotHeaders(options.requestHeaders),
+		response_status_text: normalizeStringField(options.response.statusText),
+		response_headers: snapshotHeaders(options.response.headers),
+	};
 }
 
 function buildAttemptFailureSummary(failures: AttemptFailureDetail[]): {
@@ -1351,16 +1421,12 @@ function formatUsageErrorMessage(
 	detail: string | null,
 	maxLength: number,
 ): string {
-	const safeMaxLength = Math.max(1, Math.floor(maxLength));
+	void maxLength;
 	const normalized = normalizeMessage(detail);
 	if (!normalized) {
 		return code;
 	}
-	const combined = `${code}: ${normalized}`;
-	if (combined.length <= safeMaxLength) {
-		return combined;
-	}
-	return `${combined.slice(0, safeMaxLength - 1)}…`;
+	return `${code}: ${normalized}`;
 }
 
 function stringifyErrorMeta(meta: Record<string, unknown>): string | null {
@@ -1826,19 +1892,27 @@ async function extractErrorDetails(response: Response): Promise<{
 		return {
 			errorCode: null,
 			errorMessage: summarizeHtmlErrorPayload(normalizedText, response.status),
-			errorMetaJson: JSON.stringify({
+			errorMetaJson: stringifyErrorMeta({
 				type: "html_error",
 				status: response.status,
+				status_text: normalizeStringField(response.statusText),
+				response_headers: snapshotHeaders(response.headers),
 			}),
 		};
 	}
+	const embeddedHttp = extractEmbeddedHttpStatus(normalizedText);
 	return {
 		errorCode: null,
-		errorMessage: `upstream_text_error: status=${response.status}, detail=${normalizeSummaryDetail(
-			normalizedText,
-			UPSTREAM_ERROR_DETAIL_MAX_LENGTH,
-		)}`,
-		errorMetaJson: null,
+		errorMessage: `upstream_text_error: status=${response.status}, detail=${normalizeSummaryDetail(normalizedText, UPSTREAM_ERROR_DETAIL_MAX_LENGTH)}`,
+		errorMetaJson: stringifyErrorMeta({
+			type: "text_error",
+			status: response.status,
+			status_text: normalizeStringField(response.statusText),
+			response_headers: snapshotHeaders(response.headers),
+			embedded_http_status_line: embeddedHttp.statusLine,
+			embedded_http_status: embeddedHttp.statusCode,
+			embedded_http_status_text: embeddedHttp.statusText,
+		}),
 	};
 }
 
@@ -2026,7 +2100,7 @@ function buildUpstreamHeaders(
 	apiKey: string,
 	overrides: Record<string, string>,
 ): Headers {
-	const headers = new Headers(baseHeaders);
+	const headers = sanitizeUpstreamRequestHeaders(baseHeaders);
 	headers.delete("x-admin-token");
 	headers.delete("x-api-key");
 	if (provider === "openai") {
@@ -2715,19 +2789,18 @@ proxy.all("/*", tokenAuth, async (c) => {
 			: requestText;
 		return parsedBody;
 	};
+	const rawRequestModel = extractModelFromRawJsonRequest(requestText);
 	const modelProbeBody =
 		parsedBody ??
-		(shouldSkipHeavyBodyParsing
-			? (() => {
-					const model = extractModelFromRawJsonRequest(requestText);
-					return model ? ({ model } as Record<string, unknown>) : null;
-				})()
+		(rawRequestModel
+			? ({ model: rawRequestModel } as Record<string, unknown>)
 			: null);
-	const downstreamModel = parseDownstreamModel(
+	const parsedDownstreamModel = parseDownstreamModel(
 		downstreamProvider,
 		requestPath,
 		modelProbeBody,
 	);
+	const downstreamModel = parsedDownstreamModel ?? rawRequestModel;
 	const inferredStream =
 		shouldSkipHeavyBodyParsing && requestText
 			? detectStreamFlagFromRawJsonRequest(requestText)
@@ -3485,6 +3558,9 @@ proxy.all("/*", tokenAuth, async (c) => {
 		recordModel: string | null;
 		attemptStartedAt: string;
 		streamOptionsHandled: boolean;
+		target: string;
+		fallbackTarget?: string;
+		requestHeaders: Headers;
 	}> = [];
 	let dispatchHandled = false;
 	let dispatchStopRetry = false;
@@ -3697,6 +3773,9 @@ proxy.all("/*", tokenAuth, async (c) => {
 				recordModel,
 				attemptStartedAt,
 				streamOptionsHandled: shouldHandleStreamOptions,
+				target,
+				fallbackTarget,
+				requestHeaders: new Headers(headers),
 			});
 		}
 		if (dispatchAttempts.length > 0) {
@@ -4042,6 +4121,15 @@ proxy.all("/*", tokenAuth, async (c) => {
 						}
 					} else {
 						const errorInfo = await extractErrorDetails(response);
+						const errorMetaJson = mergeErrorMetaJson(
+							errorInfo.errorMetaJson,
+							buildUpstreamDiagnosticMeta({
+								target: meta.target,
+								fallbackTarget: meta.fallbackTarget,
+								requestHeaders: meta.requestHeaders,
+								response,
+							}),
+						);
 						const failureUsage = await parseStreamUsageOnFailure(response);
 						const normalizedErrorCode = normalizeUpstreamErrorCode(
 							errorInfo.errorCode,
@@ -4069,7 +4157,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 							upstreamStatus: response.status,
 							errorCode: finalErrorCode,
 							errorMessage: normalizedErrorMessage,
-							errorMetaJson: errorInfo.errorMetaJson,
+							errorMetaJson,
 						};
 						recordAttemptUsage({
 							channelId: meta.channel.id,
@@ -4084,7 +4172,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 							failureStage: "upstream_response",
 							failureReason: finalErrorCode,
 							usageSource: failureUsage.usageSource,
-							errorMetaJson: errorInfo.errorMetaJson,
+							errorMetaJson,
 						});
 						recordAttemptLog({
 							attemptIndex: attemptNumber,
@@ -4830,6 +4918,15 @@ proxy.all("/*", tokenAuth, async (c) => {
 				}
 
 				const errorInfo = await extractErrorDetails(response);
+				const errorMetaJson = mergeErrorMetaJson(
+					errorInfo.errorMetaJson,
+					buildUpstreamDiagnosticMeta({
+						target,
+						fallbackTarget,
+						requestHeaders: headers,
+						response,
+					}),
+				);
 				const failureUsage = await parseStreamUsageOnFailure(response);
 				const normalizedErrorCode = normalizeUpstreamErrorCode(
 					errorInfo.errorCode,
@@ -4857,7 +4954,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 					upstreamStatus: response.status,
 					errorCode: finalErrorCode,
 					errorMessage: normalizedErrorMessage,
-					errorMetaJson: errorInfo.errorMetaJson,
+					errorMetaJson,
 				};
 				recordAttemptUsage({
 					channelId: channel.id,
@@ -4872,7 +4969,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 					failureStage: "upstream_response",
 					failureReason: finalErrorCode,
 					usageSource: failureUsage.usageSource,
-					errorMetaJson: errorInfo.errorMetaJson,
+					errorMetaJson,
 				});
 				recordAttemptLog({
 					attemptIndex: attemptNumber,
