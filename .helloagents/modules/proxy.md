@@ -26,6 +26,8 @@
 - 对 `/v1/responses` 且上游返回 400/404 时回退为 `/responses` 重试一次
 - 可配置失败重试轮询（响应 5xx/429 时触发）
 - 下游客户端连接断开后，停止剩余本地重试与 attempt-worker 分发重试，避免继续执行后续 attempt
+- 普通单次 attempt 路径也会透传下游 `AbortSignal` 到 direct fetch、本地 `attempt-worker` HTTP 和 service binding，避免本地 dev 下断链后继续把当前 attempt 当作普通失败重试
+- 本地 `bun run dev` 默认会给主 worker 注入 `LOCAL_ATTEMPT_WORKER_URL`，因此开发环境优先走本地 `attempt-worker` HTTP transport，只有显式切到 remote worker 或停用 attempt-worker 时才不走这条链路
 - 记录流式请求标记、首 token 延迟与推理强度到 usage_logs
 - usage 事件调度仅传 event 对象，失败请求也必须记录 error usage
 - 使用日志与模型能力写入可通过 `USAGE_QUEUE` 异步化（队列不可用时自动回退同步写入）

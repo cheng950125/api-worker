@@ -2138,6 +2138,11 @@ type AttemptBindingFailure = {
 	latencyMs: number;
 };
 
+type AttemptBindingAborted = {
+	kind: "aborted";
+	latencyMs: number;
+};
+
 type AttemptWorkerInternalError = {
 	kind: "attempt_worker_error";
 	errorCode: string;
@@ -2150,6 +2155,7 @@ type AttemptWorkerInternalError = {
 type AttemptBindingResult =
 	| AttemptBindingSuccess
 	| AttemptBindingFailure
+	| AttemptBindingAborted
 	| AttemptWorkerInternalError;
 type DispatchBindingResult =
 	| DispatchBindingSuccess
@@ -2403,8 +2409,13 @@ async function executeAttemptViaWorker(
 	input: AttemptBindingRequest,
 	policy: AttemptBindingPolicy,
 	state: AttemptBindingState,
+	signal?: AbortSignal | null,
 ): Promise<AttemptBindingResult> {
 	const started = Date.now();
+	const buildAbortedResult = (): AttemptBindingAborted => ({
+		kind: "aborted",
+		latencyMs: Date.now() - started,
+	});
 	const executeLocalDirect = async (): Promise<AttemptBindingSuccess> => {
 		let response = await fetchWithTimeoutLocal(
 			input.target,
@@ -2414,6 +2425,7 @@ async function executeAttemptViaWorker(
 				body: input.bodyText || undefined,
 			},
 			input.timeoutMs,
+			signal,
 		);
 		let responsePath = input.responsePath;
 		if (
@@ -2428,6 +2440,7 @@ async function executeAttemptViaWorker(
 					body: input.bodyText || undefined,
 				},
 				input.timeoutMs,
+				signal,
 			);
 			responsePath = input.fallbackPath ?? input.responsePath;
 		}
@@ -2446,8 +2459,18 @@ async function executeAttemptViaWorker(
 		c.env.LOCAL_ATTEMPT_WORKER_URL,
 	);
 	const binding = c.env.ATTEMPT_WORKER;
+	if (signal?.aborted) {
+		return buildAbortedResult();
+	}
 	if (state.forceLocalDirect || (!localAttemptWorkerUrl && !binding)) {
-		return executeLocalDirect();
+		try {
+			return await executeLocalDirect();
+		} catch (error) {
+			if (signal?.aborted) {
+				return buildAbortedResult();
+			}
+			throw error;
+		}
 	}
 	try {
 		const requestInit: RequestInit = {
@@ -2462,6 +2485,7 @@ async function executeAttemptViaWorker(
 					`${localAttemptWorkerUrl}/internal/attempt`,
 					requestInit,
 					Math.max(0, input.timeoutMs),
+					signal,
 				)
 			: await binding!.fetch("https://attempt-worker/internal/attempt", {
 					method: "POST",
@@ -2469,6 +2493,7 @@ async function executeAttemptViaWorker(
 						"content-type": "application/json",
 					},
 					body: JSON.stringify(input),
+					signal: signal as never,
 				});
 		const attemptWorkerError = await parseAttemptWorkerErrorResponse(
 			response as unknown as Response,
@@ -2498,6 +2523,9 @@ async function executeAttemptViaWorker(
 			),
 		};
 	} catch (error) {
+		if (signal?.aborted) {
+			return buildAbortedResult();
+		}
 		const errorMessage = normalizeMessage(
 			error instanceof Error ? error.message : String(error),
 		);
@@ -2511,7 +2539,14 @@ async function executeAttemptViaWorker(
 			};
 		}
 		registerAttemptWorkerTransportFailure(policy, state);
-		return executeLocalDirect();
+		try {
+			return await executeLocalDirect();
+		} catch (fallbackError) {
+			if (signal?.aborted) {
+				return buildAbortedResult();
+			}
+			throw fallbackError;
+		}
 	}
 }
 
@@ -4695,7 +4730,11 @@ proxy.all("/*", tokenAuth, async (c) => {
 					},
 					attemptBindingPolicy,
 					attemptBindingState,
+					downstreamSignal,
 				);
+				if (attemptResult.kind === "aborted" || downstreamSignal.aborted) {
+					return downstreamAbortResponse();
+				}
 				if (
 					attemptResult.kind === "binding_error" ||
 					attemptResult.kind === "attempt_worker_error"
@@ -4820,7 +4859,11 @@ proxy.all("/*", tokenAuth, async (c) => {
 							},
 							attemptBindingPolicy,
 							attemptBindingState,
+							downstreamSignal,
 						);
+						if (retried.kind === "aborted" || downstreamSignal.aborted) {
+							return downstreamAbortResponse();
+						}
 						if (
 							retried.kind === "binding_error" ||
 							retried.kind === "attempt_worker_error"

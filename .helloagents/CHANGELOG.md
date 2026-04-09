@@ -22,6 +22,10 @@
 
 ### 修复
 
+- **[worker/proxy]**: 补齐普通单次 attempt 路径的取消传播；本地 dev 默认走 `LOCAL_ATTEMPT_WORKER_URL` 时，direct/local_http/binding 三条调用链都会在客户端断链后停止继续重试 — by lsy
+  - 方案: [202604091222_stop-local-dev-retry-after-client-disconnect](archive/2026-04/202604091222_stop-local-dev-retry-after-client-disconnect/)
+  - 决策: stop-local-dev-retry-after-client-disconnect#D001(先补齐普通 attempt 取消传播，不直接改 dev transport 默认值)
+
 - **[worker/proxy]**: 修复客户端断开连接后重试链路仍可能继续执行的问题；现在本地重试与 attempt-worker 分发重试都会在调用方断链后停止后续 attempt — by lsy
   - 方案: [202604091009_stop-retry-on-client-disconnect](archive/2026-04/202604091009_stop-retry-on-client-disconnect/)
 
