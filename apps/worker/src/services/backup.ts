@@ -13,7 +13,7 @@ import { sha256Hex } from "../utils/crypto";
 import { safeJsonParse } from "../utils/json";
 import { nowIso } from "../utils/time";
 
-const BACKUP_SCHEMA_VERSION = 1;
+const BACKUP_SCHEMA_VERSION = 2;
 
 export type BackupSettingRecord = {
 	key: string;
@@ -25,6 +25,7 @@ export type BackupCallTokenRecord = {
 	id: string;
 	name: string;
 	api_key: string;
+	priority: number;
 	models_json: string | null;
 	created_at: string | null;
 	updated_at: string | null;
@@ -159,6 +160,7 @@ type CallTokenRow = {
 	channel_id: string;
 	name: string;
 	api_key: string;
+	priority: number | null;
 	models_json: string | null;
 	created_at: string | null;
 	updated_at: string | null;
@@ -247,6 +249,7 @@ const normalizeCallTokenRecords = (
 			id,
 			name: String(row.name ?? "").trim() || "调用令牌",
 			api_key: apiKey,
+			priority: Math.max(0, toInt(row.priority, result.length)),
 			models_json:
 				typeof row.models_json === "string" && row.models_json.trim().length > 0
 					? row.models_json
@@ -255,7 +258,16 @@ const normalizeCallTokenRecords = (
 			updated_at: normalizeIsoOrNull(row.updated_at),
 		});
 	}
-	return result.sort((left, right) => left.id.localeCompare(right.id));
+	return result
+		.sort((left, right) =>
+			left.priority === right.priority
+				? left.id.localeCompare(right.id)
+				: left.priority - right.priority,
+		)
+		.map((token, index) => ({
+			...token,
+			priority: index,
+		}));
 };
 
 const normalizeSiteRecords = (input: unknown): BackupSiteRecord[] => {
@@ -495,7 +507,7 @@ export async function createBackupPayload(
 		const placeholders = channelIds.map(() => "?").join(", ");
 		const callTokenResult = await db
 			.prepare(
-				`SELECT * FROM channel_call_tokens WHERE channel_id IN (${placeholders}) ORDER BY channel_id ASC, id ASC`,
+				`SELECT * FROM channel_call_tokens WHERE channel_id IN (${placeholders}) ORDER BY channel_id ASC, priority ASC, created_at ASC, id ASC`,
 			)
 			.bind(...channelIds)
 			.all<CallTokenRow>();
@@ -508,6 +520,7 @@ export async function createBackupPayload(
 			id: row.id,
 			name: row.name,
 			api_key: row.api_key,
+			priority: Math.max(0, toInt(row.priority, list.length)),
 			models_json: row.models_json ?? null,
 			created_at: normalizeIsoOrNull(row.created_at),
 			updated_at: normalizeIsoOrNull(row.updated_at),
@@ -543,7 +556,9 @@ export async function createBackupPayload(
 		created_at: normalizeIsoOrNull(row.created_at),
 		updated_at: normalizeIsoOrNull(row.updated_at),
 		call_tokens: (callTokenMap.get(row.id) ?? []).sort((left, right) =>
-			left.id.localeCompare(right.id),
+			left.priority === right.priority
+				? left.id.localeCompare(right.id)
+				: left.priority - right.priority,
 		),
 	}));
 
@@ -789,6 +804,7 @@ export async function importBackupPayload(
 				channel_id: site.id,
 				name: token.name,
 				api_key: token.api_key,
+				priority: Math.max(0, toInt(token.priority, 0)),
 				created_at: token.created_at ?? now,
 				updated_at: token.updated_at ?? now,
 			})),

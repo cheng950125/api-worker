@@ -10,6 +10,7 @@ export type SiteCallToken = {
 	id: string;
 	name: string;
 	api_key: string;
+	priority?: number;
 };
 
 export type Site = {
@@ -386,6 +387,7 @@ export type SiteCallTokenForm = {
 	id?: string;
 	name: string;
 	api_key: string;
+	priority?: number;
 };
 
 export type SettingsForm = {

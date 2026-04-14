@@ -25,7 +25,7 @@ export async function listCallTokens(
 	}
 	const { whereSql, bindings } = buildWhere(filters);
 	const statement = db.prepare(
-		`SELECT * FROM channel_call_tokens ${whereSql} ORDER BY created_at ASC`,
+		`SELECT * FROM channel_call_tokens ${whereSql} ORDER BY channel_id ASC, priority ASC, created_at ASC, id ASC`,
 	);
 	const rows = await statement.bind(...bindings).all<ChannelCallTokenRow>();
 	return rows.results ?? [];
@@ -46,6 +46,7 @@ export type ChannelCallTokenInsertInput = {
 	channel_id: string;
 	name: string;
 	api_key: string;
+	priority: number;
 	created_at: string;
 	updated_at: string;
 };
@@ -56,13 +57,14 @@ export async function insertCallToken(
 ): Promise<void> {
 	await db
 		.prepare(
-			"INSERT INTO channel_call_tokens (id, channel_id, name, api_key, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+			"INSERT INTO channel_call_tokens (id, channel_id, name, api_key, priority, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
 		)
 		.bind(
 			input.id,
 			input.channel_id,
 			input.name,
 			input.api_key,
+			input.priority,
 			input.created_at,
 			input.updated_at,
 		)

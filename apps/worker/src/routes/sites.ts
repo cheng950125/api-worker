@@ -36,6 +36,11 @@ import {
 	parseSiteVerificationSummary,
 } from "../services/site-verification";
 import {
+	normalizeCallTokens,
+	type NormalizedSiteCallToken,
+	type SiteCallTokenInput,
+} from "../services/site-call-token-order";
+import {
 	listSiteTaskReports,
 	saveSiteTaskReport,
 } from "../services/site-task-report-store";
@@ -59,10 +64,8 @@ type SitePayload = {
 	checkin_status?: string;
 };
 
-type CallTokenPayload = {
+type CallTokenPayload = SiteCallTokenInput & {
 	id?: string;
-	name?: string;
-	api_key?: string;
 };
 
 const parseSiteType = (value: unknown): SiteType => {
@@ -117,39 +120,9 @@ const parseBoolean = (value: unknown, fallback = false): boolean => {
 	return fallback;
 };
 
-type NormalizedCallToken = {
-	name: string;
-	api_key: string;
-};
-
-const normalizeCallTokens = (
-	rawTokens: CallTokenPayload[] | undefined,
-	fallbackApiKey: string | undefined,
-): NormalizedCallToken[] => {
-	const tokens =
-		rawTokens?.map((token, index) => ({
-			name: trimValue(token.name) || `调用令牌${index + 1}`,
-			api_key: trimValue(token.api_key),
-		})) ?? [];
-	const filtered = tokens.filter((token) => token.api_key.length > 0);
-	if (filtered.length > 0) {
-		return filtered;
-	}
-	const fallback = trimValue(fallbackApiKey);
-	if (fallback) {
-		return [
-			{
-				name: "主调用令牌",
-				api_key: fallback,
-			},
-		];
-	}
-	return [];
-};
-
 const toCallTokenRows = (
 	channelId: string,
-	tokens: NormalizedCallToken[],
+	tokens: NormalizedSiteCallToken[],
 	now: string,
 ) =>
 	tokens.map((token) => ({
@@ -157,6 +130,7 @@ const toCallTokenRows = (
 		channel_id: channelId,
 		name: token.name,
 		api_key: token.api_key,
+		priority: token.priority,
 		created_at: now,
 		updated_at: now,
 	}));
@@ -185,6 +159,7 @@ const buildSiteRecord = (
 		id: string;
 		name: string;
 		api_key: string;
+		priority?: number | null;
 	}>,
 ) => {
 	const metadata = parseSiteMetadata(channel.metadata_json);
@@ -237,6 +212,7 @@ sites.get("/", async (c) => {
 			id: row.id,
 			name: row.name,
 			api_key: row.api_key,
+			priority: row.priority ?? 0,
 		};
 		const list = callTokenMap.get(row.channel_id) ?? [];
 		list.push(entry);
@@ -253,6 +229,7 @@ sites.get("/", async (c) => {
 								id: "",
 								name: "主调用令牌",
 								api_key: channel.api_key,
+								priority: 0,
 							},
 						]
 					: [];

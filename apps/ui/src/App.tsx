@@ -1150,6 +1150,7 @@ const App = () => {
 									id: "",
 									name: "主调用令牌",
 									api_key: site.api_key,
+									priority: 0,
 								},
 							]
 						: [];
@@ -1159,11 +1160,13 @@ const App = () => {
 							id: token.id,
 							name: token.name,
 							api_key: token.api_key,
+							priority: token.priority,
 						}))
 					: [
 							{
 								name: "主调用令牌",
 								api_key: "",
+								priority: 0,
 							},
 						];
 			setSiteForm({
@@ -1424,6 +1427,7 @@ const App = () => {
 					id: token.id,
 					name: token.name.trim() || `调用令牌${index + 1}`,
 					api_key: token.api_key.trim(),
+					priority: index,
 				}))
 				.filter((token) => token.api_key.length > 0);
 			if (callTokens.length === 0) {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "hono/jsx/dom";
+import { useEffect, useMemo, useRef, useState } from "hono/jsx/dom";
 import {
 	Button,
 	Card,
@@ -152,6 +152,111 @@ const formatTaskTime = (value: string) =>
 		hour12: false,
 	});
 
+const normalizeCallTokenOrder = (tokens: SiteForm["call_tokens"]) =>
+	tokens.map((token, index) => ({
+		...token,
+		priority: index,
+	}));
+
+const getCallTokenDragKey = (
+	token: SiteForm["call_tokens"][number],
+	fallbackIndex: number,
+) => {
+	if (token.id) {
+		return token.id;
+	}
+	const existingKey = callTokenDraftKeyMap.get(token);
+	if (existingKey) {
+		return existingKey;
+	}
+	const nextKey = `draft-${fallbackIndex}-${callTokenDraftKeySeed + 1}`;
+	callTokenDraftKeySeed += 1;
+	callTokenDraftKeyMap.set(token, nextKey);
+	return nextKey;
+};
+
+const reorderCallTokens = (
+	tokens: SiteForm["call_tokens"],
+	fromIndex: number,
+	toIndex: number,
+) => {
+	if (
+		fromIndex === toIndex ||
+		fromIndex < 0 ||
+		toIndex < 0 ||
+		fromIndex >= tokens.length ||
+		toIndex >= tokens.length
+	) {
+		return tokens;
+	}
+	const next = [...tokens];
+	const [movedToken] = next.splice(fromIndex, 1);
+	next.splice(toIndex, 0, movedToken);
+	return next;
+};
+
+const haveSameCallTokenSequence = (
+	left: SiteForm["call_tokens"],
+	right: SiteForm["call_tokens"],
+) => {
+	if (left.length !== right.length) {
+		return false;
+	}
+	for (let index = 0; index < left.length; index += 1) {
+		const leftKey = getCallTokenDragKey(left[index], index);
+		const rightKey = getCallTokenDragKey(right[index], index);
+		if (leftKey !== rightKey) {
+			return false;
+		}
+	}
+	return true;
+};
+
+const logCallTokenDrag = (
+	stage: string,
+	detail: Record<string, unknown> = {},
+) => {
+	if (typeof window === "undefined") {
+		return;
+	}
+	const enabled =
+		import.meta.env.DEV ||
+		window.localStorage.getItem("debug:site-call-token-drag") === "1";
+	if (!enabled) {
+		return;
+	}
+	console.debug("[sites:call-token-drag]", stage, detail);
+};
+
+const callTokenFlipDurationMs = 220;
+const callTokenDropSettleMs = 180;
+const callTokenDraftKeyMap = new WeakMap<
+	SiteForm["call_tokens"][number],
+	string
+>();
+let callTokenDraftKeySeed = 0;
+
+type ActiveCallTokenDrag = {
+	currentIndex: number;
+	grabOffsetX: number;
+	grabOffsetY: number;
+	height: number;
+	isSettling: boolean;
+	left: number;
+	pointerId: number;
+	tokenKey: string;
+	top: number;
+	width: number;
+};
+
+type CallTokenOverlayVisual = {
+	frameId: number | null;
+	scale: number;
+	transition: string;
+	x: number;
+	y: number;
+};
+
 export const SitesView = ({
 	siteForm,
 	sitePage,
@@ -195,6 +300,24 @@ export const SitesView = ({
 	const isRecoveryEvaluate = isActionPending("site:recoveryEvaluate");
 	const isRefreshingAll = isActionPending("site:refreshAll");
 	const [localSearch, setLocalSearch] = useState(siteSearch);
+	const [draftCallTokens, setDraftCallTokens] = useState<
+		SiteForm["call_tokens"]
+	>(() => siteForm.call_tokens);
+	const [activeCallTokenDrag, setActiveCallTokenDrag] =
+		useState<ActiveCallTokenDrag | null>(null);
+	const callTokenCardRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+	const activeCallTokenDragRef = useRef<ActiveCallTokenDrag | null>(null);
+	const callTokenOverlayRef = useRef<HTMLDivElement | null>(null);
+	const callTokenOverlayVisualRef = useRef<CallTokenOverlayVisual>({
+		frameId: null,
+		scale: 1.015,
+		transition: "none",
+		x: 0,
+		y: 0,
+	});
+	const callTokenFlipRectsRef = useRef<Map<string, DOMRect>>(new Map());
+	const callTokenFlipFrameRef = useRef<number | null>(null);
+	const callTokenDropTimerRef = useRef<number | null>(null);
 	const [activeReportTask, setActiveReportTask] = useState<SiteTaskKind | null>(
 		null,
 	);
@@ -266,31 +389,274 @@ export const SitesView = ({
 				.join(" "),
 		[visibleColumnSet],
 	);
+	const displayCallTokens = draftCallTokens;
+	const draggingCallTokenKey = activeCallTokenDrag?.tokenKey ?? null;
+	const isDraggingCallToken = draggingCallTokenKey !== null;
+	const syncCallTokensToForm = (tokens: SiteForm["call_tokens"]) => {
+		onFormChange({ call_tokens: normalizeCallTokenOrder(tokens) });
+	};
+	const commitCallTokenOrder = (
+		tokens: SiteForm["call_tokens"],
+		options?: { syncForm?: boolean },
+	) => {
+		const normalizedTokens = normalizeCallTokenOrder(tokens);
+		setDraftCallTokens(normalizedTokens);
+		if (options?.syncForm !== false) {
+			syncCallTokensToForm(normalizedTokens);
+		}
+	};
+	const setActiveCallTokenDragState = (next: ActiveCallTokenDrag | null) => {
+		activeCallTokenDragRef.current = next;
+		setActiveCallTokenDrag(next);
+	};
+	const getCallTokenOverlayVisual = (): CallTokenOverlayVisual => {
+		if (!callTokenOverlayVisualRef.current) {
+			callTokenOverlayVisualRef.current = {
+				frameId: null,
+				scale: 1.015,
+				transition: "none",
+				x: 0,
+				y: 0,
+			};
+		}
+		return callTokenOverlayVisualRef.current;
+	};
+	const flushCallTokenOverlayVisual = () => {
+		const overlay = callTokenOverlayRef.current;
+		const visual = getCallTokenOverlayVisual();
+		if (!overlay) {
+			visual.frameId = null;
+			return;
+		}
+		overlay.style.transition = visual.transition;
+		overlay.style.transform = `translate3d(${visual.x}px, ${visual.y}px, 0) scale(${visual.scale})`;
+		visual.frameId = null;
+	};
+	const scheduleCallTokenOverlayVisual = (
+		patch: Partial<Omit<CallTokenOverlayVisual, "frameId">>,
+	) => {
+		const visual = getCallTokenOverlayVisual();
+		callTokenOverlayVisualRef.current = {
+			...visual,
+			...patch,
+			frameId: visual.frameId,
+		};
+		if (visual.frameId !== null) {
+			return;
+		}
+		const frameId = window.requestAnimationFrame(() => {
+			flushCallTokenOverlayVisual();
+		});
+		callTokenOverlayVisualRef.current.frameId = frameId;
+	};
+	const getCallTokenCardRefMap = () => {
+		if (!callTokenCardRefs.current) {
+			callTokenCardRefs.current = new Map<string, HTMLDivElement>();
+		}
+		return callTokenCardRefs.current;
+	};
+	const captureCallTokenRects = () => {
+		const cardRefs = getCallTokenCardRefMap();
+		const rects = new Map<string, DOMRect>();
+		for (let index = 0; index < displayCallTokens.length; index += 1) {
+			const token = displayCallTokens[index];
+			const tokenKey = getCallTokenDragKey(token, index);
+			const element = cardRefs.get(tokenKey);
+			if (element) {
+				rects.set(tokenKey, element.getBoundingClientRect());
+			}
+		}
+		return rects;
+	};
+	const queueCallTokenFlip = () => {
+		callTokenFlipRectsRef.current = captureCallTokenRects();
+	};
+	const setCallTokenCardRef = (
+		tokenKey: string,
+		element: HTMLDivElement | null,
+	) => {
+		const cardRefs = getCallTokenCardRefMap();
+		if (element) {
+			cardRefs.set(tokenKey, element);
+			return;
+		}
+		cardRefs.delete(tokenKey);
+	};
 	const updateCallToken = (
 		index: number,
 		patch: Partial<SiteForm["call_tokens"][number]>,
 	) => {
-		const next = siteForm.call_tokens.map((token, idx) =>
+		const next = displayCallTokens.map((token, idx) =>
 			idx === index ? { ...token, ...patch } : token,
 		);
-		onFormChange({ call_tokens: next });
+		commitCallTokenOrder(next);
 	};
 	const addCallToken = () => {
 		const next = [
-			...siteForm.call_tokens,
+			...displayCallTokens,
 			{
-				name: `调用令牌${siteForm.call_tokens.length + 1}`,
+				name: `调用令牌${displayCallTokens.length + 1}`,
 				api_key: "",
+				priority: displayCallTokens.length,
 			},
 		];
-		onFormChange({ call_tokens: next });
+		commitCallTokenOrder(next);
 	};
 	const removeCallToken = (index: number) => {
-		if (siteForm.call_tokens.length <= 1) {
+		if (displayCallTokens.length <= 1) {
 			return;
 		}
-		const next = siteForm.call_tokens.filter((_, idx) => idx !== index);
-		onFormChange({ call_tokens: next });
+		const next = displayCallTokens.filter((_, idx) => idx !== index);
+		commitCallTokenOrder(next);
+		setActiveCallTokenDragState(null);
+	};
+	const moveCallToken = (fromIndex: number, toIndex: number) => {
+		logCallTokenDrag("move-request", {
+			fromIndex,
+			toIndex,
+			total: displayCallTokens.length,
+		});
+		queueCallTokenFlip();
+		const next = reorderCallTokens(displayCallTokens, fromIndex, toIndex);
+		commitCallTokenOrder(next);
+	};
+	const syncDraggedCallTokenOrder = (nextIndex: number) => {
+		const currentDrag = activeCallTokenDragRef.current;
+		if (!currentDrag || currentDrag.currentIndex === nextIndex) {
+			return;
+		}
+		logCallTokenDrag("reorder", {
+			tokenKey: currentDrag.tokenKey,
+			fromIndex: currentDrag.currentIndex,
+			toIndex: nextIndex,
+		});
+		queueCallTokenFlip();
+		setActiveCallTokenDragState({
+			...currentDrag,
+			currentIndex: nextIndex,
+		});
+		const nextTokens = reorderCallTokens(
+			displayCallTokens,
+			currentDrag.currentIndex,
+			nextIndex,
+		);
+		commitCallTokenOrder(nextTokens, { syncForm: false });
+	};
+	const beginPointerDrag = (
+		tokenKey: string,
+		index: number,
+		event: PointerEvent,
+	) => {
+		const element = getCallTokenCardRefMap().get(tokenKey);
+		const rect = element?.getBoundingClientRect();
+		if (!rect) {
+			logCallTokenDrag("pointer-down-skip", {
+				tokenKey,
+				index,
+				reason: "missing-rect",
+			});
+			return;
+		}
+		logCallTokenDrag("pointer-down", {
+			tokenKey,
+			index,
+			pointerId: event.pointerId,
+			clientX: event.clientX,
+			clientY: event.clientY,
+		});
+		setActiveCallTokenDragState({
+			currentIndex: index,
+			grabOffsetX: event.clientX - rect.left,
+			grabOffsetY: event.clientY - rect.top,
+			height: rect.height,
+			isSettling: false,
+			left: rect.left,
+			pointerId: event.pointerId,
+			tokenKey,
+			top: rect.top,
+			width: rect.width,
+		});
+		callTokenOverlayVisualRef.current = {
+			frameId: null,
+			scale: 1.015,
+			transition: "none",
+			x: 0,
+			y: 0,
+		};
+		const currentTarget = event.currentTarget as
+			| (EventTarget & { setPointerCapture?: (pointerId: number) => void })
+			| null;
+		currentTarget?.setPointerCapture?.(event.pointerId);
+	};
+	const resetCallTokenDrag = () => {
+		logCallTokenDrag("reset", {
+			draggingCallTokenKey,
+		});
+		if (callTokenDropTimerRef.current !== null) {
+			window.clearTimeout(callTokenDropTimerRef.current);
+			callTokenDropTimerRef.current = null;
+		}
+		if (callTokenFlipFrameRef.current !== null) {
+			window.cancelAnimationFrame(callTokenFlipFrameRef.current);
+			callTokenFlipFrameRef.current = null;
+		}
+		const overlayVisual = getCallTokenOverlayVisual();
+		if (overlayVisual.frameId !== null) {
+			window.cancelAnimationFrame(overlayVisual.frameId);
+		}
+		callTokenOverlayVisualRef.current = {
+			frameId: null,
+			scale: 1.015,
+			transition: "none",
+			x: 0,
+			y: 0,
+		};
+		if (callTokenOverlayRef.current) {
+			callTokenOverlayRef.current.style.transition = "";
+			callTokenOverlayRef.current.style.transform = "";
+		}
+		callTokenFlipRectsRef.current = new Map();
+		setActiveCallTokenDragState(null);
+	};
+	const finishPointerDrag = () => {
+		const currentDrag = activeCallTokenDragRef.current;
+		if (!currentDrag) {
+			logCallTokenDrag("drop-skip", {
+				reason: "missing-active-drag",
+			});
+			return;
+		}
+		const targetElement = getCallTokenCardRefMap().get(currentDrag.tokenKey);
+		const targetRect = targetElement?.getBoundingClientRect();
+		if (!targetRect) {
+			resetCallTokenDrag();
+			return;
+		}
+		logCallTokenDrag("pointer-up", {
+			tokenKey: currentDrag.tokenKey,
+			pointerId: currentDrag.pointerId,
+			targetIndex: currentDrag.currentIndex,
+			targetTop: targetRect.top,
+		});
+		setActiveCallTokenDragState({
+			...currentDrag,
+			isSettling: true,
+		});
+		scheduleCallTokenOverlayVisual({
+			scale: 1,
+			transition: `transform ${callTokenDropSettleMs}ms cubic-bezier(0.22, 1, 0.36, 1)`,
+			x: targetRect.left - currentDrag.left,
+			y: targetRect.top - currentDrag.top,
+		});
+		if (!haveSameCallTokenSequence(displayCallTokens, siteForm.call_tokens)) {
+			syncCallTokensToForm(displayCallTokens);
+		}
+		if (callTokenDropTimerRef.current !== null) {
+			window.clearTimeout(callTokenDropTimerRef.current);
+		}
+		callTokenDropTimerRef.current = window.setTimeout(() => {
+			resetCallTokenDrag();
+		}, callTokenDropSettleMs);
 	};
 	const toggleSort = (key: SiteSortKey) => {
 		if (siteSort.key === key) {
@@ -443,6 +809,336 @@ export const SitesView = ({
 		}, 300);
 		return () => window.clearTimeout(timer);
 	}, [localSearch, onSearchChange, siteSearch]);
+	useEffect(() => {
+		if (isDraggingCallToken) {
+			return;
+		}
+		if (draftCallTokens === siteForm.call_tokens) {
+			return;
+		}
+		setDraftCallTokens(siteForm.call_tokens);
+	}, [draftCallTokens, isDraggingCallToken, siteForm.call_tokens]);
+	useEffect(() => {
+		const previousRects =
+			callTokenFlipRectsRef.current ?? new Map<string, DOMRect>();
+		if (previousRects.size === 0) {
+			return;
+		}
+		if (callTokenFlipFrameRef.current !== null) {
+			window.cancelAnimationFrame(callTokenFlipFrameRef.current);
+			callTokenFlipFrameRef.current = null;
+		}
+		const frameId = window.requestAnimationFrame(() => {
+			const cardRefs = getCallTokenCardRefMap();
+			let animatedCount = 0;
+			previousRects.forEach((previousRect, tokenKey) => {
+				if (tokenKey === draggingCallTokenKey) {
+					return;
+				}
+				const element = cardRefs.get(tokenKey);
+				if (!element) {
+					return;
+				}
+				const nextRect = element.getBoundingClientRect();
+				const deltaY = previousRect.top - nextRect.top;
+				if (Math.abs(deltaY) < 1) {
+					return;
+				}
+				animatedCount += 1;
+				element.style.transition = "none";
+				element.style.transform = `translateY(${deltaY}px)`;
+				window.requestAnimationFrame(() => {
+					element.style.transition = `transform ${callTokenFlipDurationMs}ms cubic-bezier(0.22, 1, 0.36, 1)`;
+					element.style.transform = "";
+				});
+				const cleanup = () => {
+					element.style.transition = "";
+					element.removeEventListener("transitionend", cleanup);
+				};
+				element.addEventListener("transitionend", cleanup);
+			});
+			logCallTokenDrag("flip-play", {
+				animatedCount,
+				draggingCallTokenKey,
+			});
+			callTokenFlipRectsRef.current = new Map();
+			callTokenFlipFrameRef.current = null;
+		});
+		callTokenFlipFrameRef.current = frameId;
+		return () => window.cancelAnimationFrame(frameId);
+	}, [displayCallTokens, draggingCallTokenKey]);
+	useEffect(() => {
+		if (!isDraggingCallToken) {
+			return;
+		}
+		const handlePointerMove = (event: PointerEvent) => {
+			const currentDrag = activeCallTokenDragRef.current;
+			if (!currentDrag || currentDrag.pointerId !== event.pointerId) {
+				return;
+			}
+			const nextLeft = event.clientX - currentDrag.grabOffsetX;
+			const nextTop = event.clientY - currentDrag.grabOffsetY;
+			const nextOffsetX = nextLeft - currentDrag.left;
+			const nextOffsetY = nextTop - currentDrag.top;
+			let nextIndex = currentDrag.currentIndex;
+			while (nextIndex > 0) {
+				const previousToken = displayCallTokens[nextIndex - 1];
+				const previousKey = getCallTokenDragKey(previousToken, nextIndex - 1);
+				const previousCard = getCallTokenCardRefMap().get(previousKey);
+				if (!previousCard) {
+					break;
+				}
+				const previousRect = previousCard.getBoundingClientRect();
+				if (event.clientY < previousRect.top + previousRect.height / 2) {
+					nextIndex -= 1;
+					continue;
+				}
+				break;
+			}
+			while (nextIndex < displayCallTokens.length - 1) {
+				const nextToken = displayCallTokens[nextIndex + 1];
+				const nextKey = getCallTokenDragKey(nextToken, nextIndex + 1);
+				const nextCard = getCallTokenCardRefMap().get(nextKey);
+				if (!nextCard) {
+					break;
+				}
+				const nextRect = nextCard.getBoundingClientRect();
+				if (event.clientY > nextRect.top + nextRect.height / 2) {
+					nextIndex += 1;
+					continue;
+				}
+				break;
+			}
+			logCallTokenDrag("pointer-move", {
+				tokenKey: currentDrag.tokenKey,
+				pointerId: event.pointerId,
+				clientX: event.clientX,
+				clientY: event.clientY,
+				nextIndex,
+				x: nextOffsetX,
+				y: nextOffsetY,
+			});
+			scheduleCallTokenOverlayVisual({
+				scale: 1.015,
+				transition: "none",
+				x: nextOffsetX,
+				y: nextOffsetY,
+			});
+			syncDraggedCallTokenOrder(nextIndex);
+			event.preventDefault();
+		};
+		const handlePointerFinish = (event: PointerEvent) => {
+			const currentDrag = activeCallTokenDragRef.current;
+			if (!currentDrag || currentDrag.pointerId !== event.pointerId) {
+				return;
+			}
+			finishPointerDrag();
+		};
+		window.addEventListener("pointermove", handlePointerMove);
+		window.addEventListener("pointerup", handlePointerFinish);
+		window.addEventListener("pointercancel", handlePointerFinish);
+		return () => {
+			window.removeEventListener("pointermove", handlePointerMove);
+			window.removeEventListener("pointerup", handlePointerFinish);
+			window.removeEventListener("pointercancel", handlePointerFinish);
+		};
+	}, [
+		finishPointerDrag,
+		isDraggingCallToken,
+		displayCallTokens,
+		syncDraggedCallTokenOrder,
+	]);
+	useEffect(
+		() => () => {
+			if (callTokenFlipFrameRef.current !== null) {
+				window.cancelAnimationFrame(callTokenFlipFrameRef.current);
+			}
+			const overlayVisual = getCallTokenOverlayVisual();
+			if (overlayVisual.frameId !== null) {
+				window.cancelAnimationFrame(overlayVisual.frameId);
+			}
+			if (callTokenDropTimerRef.current !== null) {
+				window.clearTimeout(callTokenDropTimerRef.current);
+			}
+		},
+		[],
+	);
+	useEffect(() => {
+		if (!isDraggingCallToken) {
+			return;
+		}
+		const previousUserSelect = document.body.style.userSelect;
+		const previousCursor = document.body.style.cursor;
+		document.body.style.userSelect = "none";
+		document.body.style.cursor = "grabbing";
+		return () => {
+			document.body.style.userSelect = previousUserSelect;
+			document.body.style.cursor = previousCursor;
+		};
+	}, [isDraggingCallToken]);
+	useEffect(() => {
+		if (isSiteModalOpen) {
+			return;
+		}
+		resetCallTokenDrag();
+	}, [isSiteModalOpen]);
+	useEffect(() => {
+		if (!activeCallTokenDrag) {
+			return;
+		}
+		flushCallTokenOverlayVisual();
+	}, [
+		activeCallTokenDrag?.currentIndex,
+		activeCallTokenDrag?.isSettling,
+		activeCallTokenDrag?.tokenKey,
+	]);
+	const getCallTokenSupportText = (index: number, isDragged: boolean) => {
+		if (isDragged) {
+			return "当前位置会实时让位，松开后会平滑落回卡槽。";
+		}
+		if (isDraggingCallToken) {
+			return "其余卡片会按新的优先级即时重排。";
+		}
+		return "支持拖拽，也可使用上移/下移精确调整。";
+	};
+	const renderCallTokenCardBody = (
+		token: SiteForm["call_tokens"][number],
+		index: number,
+		tokenKey: string,
+		options: {
+			isDragged: boolean;
+			isOverlay?: boolean;
+		},
+	) => {
+		const { isDragged, isOverlay = false } = options;
+		const controlsDisabled = isOverlay || isDraggingCallToken;
+		const dragHandleClass = isOverlay
+			? "border-[color:var(--app-primary)] bg-[rgba(10,132,255,0.1)] text-[color:var(--app-primary)] shadow-[0_12px_30px_rgba(10,132,255,0.2)]"
+			: isDragged
+				? "border-[rgba(10,132,255,0.3)] bg-[rgba(10,132,255,0.05)] text-[color:var(--app-primary)]"
+				: "border-white/70 bg-white/80 text-[color:var(--app-ink-muted)] hover:border-[color:var(--app-primary)] hover:text-[color:var(--app-primary)]";
+		return (
+			<>
+				<div class="flex flex-wrap items-start justify-between gap-3">
+					<div class="flex min-w-0 items-center gap-2">
+						{isOverlay ? (
+							<div
+								aria-hidden="true"
+								class={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border text-sm ${dragHandleClass}`}
+							>
+								⋮⋮
+							</div>
+						) : (
+							<div
+								aria-label={`拖拽调整 ${token.name || `调用令牌${index + 1}`} 的优先级`}
+								class={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border text-sm transition ${dragHandleClass} ${
+									isDragged
+										? "cursor-grabbing"
+										: "cursor-grab active:cursor-grabbing"
+								}`}
+								role="button"
+								style="touch-action: none;"
+								tabIndex={isDraggingCallToken ? -1 : 0}
+								onPointerDown={(event: PointerEvent) => {
+									logCallTokenDrag("handle-pointer-down", {
+										tokenKey,
+										index,
+										button: event.button,
+										pointerId: event.pointerId,
+									});
+									if (event.button !== 0 || isDraggingCallToken) {
+										return;
+									}
+									event.preventDefault();
+									beginPointerDrag(tokenKey, index, event);
+								}}
+							>
+								⋮⋮
+							</div>
+						)}
+						<div class="min-w-0">
+							<p class="text-[11px] font-semibold uppercase tracking-[0.24em] text-[color:var(--app-ink-muted)]">
+								优先级 {index + 1}
+							</p>
+							<p class="truncate text-xs text-[color:var(--app-ink-muted)]">
+								{index === 0
+									? "主优先级，优先尝试"
+									: "优先级更低，前面的不可用时再尝试"}
+							</p>
+						</div>
+					</div>
+					<div class="flex items-center gap-2">
+						<button
+							aria-label="上移令牌优先级"
+							class="rounded-lg border border-white/70 px-2 py-1 text-[11px] font-semibold text-[color:var(--app-ink-muted)] transition hover:border-[color:var(--app-primary)] hover:text-[color:var(--app-primary)] disabled:cursor-not-allowed disabled:opacity-40"
+							type="button"
+							disabled={controlsDisabled || index === 0}
+							onClick={() => moveCallToken(index, index - 1)}
+						>
+							上移
+						</button>
+						<button
+							aria-label="下移令牌优先级"
+							class="rounded-lg border border-white/70 px-2 py-1 text-[11px] font-semibold text-[color:var(--app-ink-muted)] transition hover:border-[color:var(--app-primary)] hover:text-[color:var(--app-primary)] disabled:cursor-not-allowed disabled:opacity-40"
+							type="button"
+							disabled={
+								controlsDisabled || index === displayCallTokens.length - 1
+							}
+							onClick={() => moveCallToken(index, index + 1)}
+						>
+							下移
+						</button>
+					</div>
+				</div>
+				<div class="mt-3 grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
+					<Input
+						class="text-xs"
+						disabled={controlsDisabled}
+						placeholder="备注名"
+						value={token.name}
+						onInput={(event) =>
+							updateCallToken(index, {
+								name: (event.currentTarget as HTMLInputElement).value,
+							})
+						}
+					/>
+					<Input
+						class="text-xs"
+						disabled={controlsDisabled}
+						placeholder="调用令牌"
+						value={token.api_key}
+						onInput={(event) =>
+							updateCallToken(index, {
+								api_key: (event.currentTarget as HTMLInputElement).value,
+							})
+						}
+					/>
+				</div>
+				<div class="mt-2 flex items-center justify-between gap-3">
+					<p class="text-[11px] text-[color:var(--app-ink-muted)]">
+						{getCallTokenSupportText(index, isDragged || isOverlay)}
+					</p>
+					<button
+						class="text-[11px] font-semibold text-[color:var(--app-ink-muted)] transition-colors hover:text-[color:var(--app-danger)] disabled:cursor-not-allowed disabled:opacity-50"
+						type="button"
+						disabled={
+							controlsDisabled || displayCallTokens.length <= 1 || isDragged
+						}
+						onClick={() => removeCallToken(index)}
+					>
+						删除此令牌
+					</button>
+				</div>
+			</>
+		);
+	};
+	const activeDraggedToken =
+		activeCallTokenDrag === null
+			? null
+			: (displayCallTokens.find(
+					(token, index) =>
+						getCallTokenDragKey(token, index) === activeCallTokenDrag.tokenKey,
+				) ?? null);
 	const renderTaskReportDialog = () => {
 		if (!activeReportTask) {
 			return null;
@@ -1499,52 +2195,55 @@ export const SitesView = ({
 									</Button>
 								</div>
 								<p class="mt-2 text-xs text-[color:var(--app-ink-muted)]">
-									用于实际调用，系统会按顺序选择可用令牌。
+									用于实际调用，系统会按优先级依次选择可用令牌。可拖拽排序，最上方优先级最高。
 								</p>
 								<div class="mt-3 max-h-64 space-y-3 overflow-y-auto pr-1">
-									{siteForm.call_tokens.map((token, index) => (
-										<Card
-											variant="compact"
-											class="px-3 py-3"
-											key={`${token.id ?? "new"}-${index}`}
-										>
-											<div class="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
-												<Input
-													class="text-xs"
-													placeholder="备注名"
-													value={token.name}
-													onInput={(event) =>
-														updateCallToken(index, {
-															name: (event.currentTarget as HTMLInputElement)
-																.value,
-														})
-													}
-												/>
-												<Input
-													class="text-xs"
-													placeholder="调用令牌"
-													value={token.api_key}
-													onInput={(event) =>
-														updateCallToken(index, {
-															api_key: (event.currentTarget as HTMLInputElement)
-																.value,
-														})
-													}
-												/>
-											</div>
-											<div class="mt-2 flex items-center justify-end">
-												<button
-													class="text-[11px] font-semibold text-[color:var(--app-ink-muted)] transition-colors hover:text-[color:var(--app-danger)] disabled:cursor-not-allowed disabled:opacity-50"
-													type="button"
-													disabled={siteForm.call_tokens.length <= 1}
-													onClick={() => removeCallToken(index)}
-												>
-													删除此令牌
-												</button>
-											</div>
-										</Card>
-									))}
+									{displayCallTokens.map((token, index) => {
+										const tokenKey = getCallTokenDragKey(token, index);
+										const isDragged = draggingCallTokenKey === tokenKey;
+										return (
+											<Card
+												ref={(element: HTMLDivElement | null) =>
+													setCallTokenCardRef(tokenKey, element)
+												}
+												variant="compact"
+												class={`px-3 py-3 ${
+													isDragged
+														? "pointer-events-none border-dashed border-[rgba(10,132,255,0.35)] bg-[rgba(10,132,255,0.05)] opacity-45 shadow-none ring-1 ring-[rgba(10,132,255,0.12)]"
+														: isDraggingCallToken
+															? "border-white/85 bg-white/92 shadow-[0_14px_34px_rgba(15,23,42,0.08)] transition-shadow duration-200"
+															: ""
+												}`}
+												key={tokenKey}
+											>
+												{renderCallTokenCardBody(token, index, tokenKey, {
+													isDragged,
+												})}
+											</Card>
+										);
+									})}
 								</div>
+								{activeCallTokenDrag && activeDraggedToken && (
+									<Card
+										aria-hidden="true"
+										ref={(element: HTMLDivElement | null) => {
+											callTokenOverlayRef.current = element;
+										}}
+										variant="compact"
+										class="pointer-events-none fixed z-[90] px-3 py-3 border-[color:var(--app-primary)] bg-white shadow-[0_26px_60px_rgba(15,23,42,0.24)] ring-1 ring-[rgba(10,132,255,0.18)]"
+										style={`left:${activeCallTokenDrag.left}px; top:${activeCallTokenDrag.top}px; width:${activeCallTokenDrag.width}px; min-height:${activeCallTokenDrag.height}px; will-change: transform;`}
+									>
+										{renderCallTokenCardBody(
+											activeDraggedToken,
+											activeCallTokenDrag.currentIndex,
+											activeCallTokenDrag.tokenKey,
+											{
+												isDragged: false,
+												isOverlay: true,
+											},
+										)}
+									</Card>
+								)}
 							</Card>
 							{needsSystemToken && (
 								<Card class="p-4">

@@ -42,6 +42,7 @@ export const initialSiteForm: SiteForm = {
 		{
 			name: "主调用令牌",
 			api_key: "",
+			priority: 0,
 		},
 	],
 };

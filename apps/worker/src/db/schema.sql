@@ -30,13 +30,14 @@ CREATE TABLE IF NOT EXISTS channel_call_tokens (
   channel_id TEXT NOT NULL,
   name TEXT NOT NULL,
   api_key TEXT NOT NULL,
+  priority INTEGER NOT NULL DEFAULT 0,
   models_json TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_channel_call_tokens_channel_id
-  ON channel_call_tokens (channel_id, created_at);
+  ON channel_call_tokens (channel_id, priority, created_at, id);
 
 CREATE TABLE IF NOT EXISTS tokens (
   id TEXT PRIMARY KEY,
