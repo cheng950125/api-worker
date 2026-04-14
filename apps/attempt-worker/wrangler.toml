@@ -21,7 +21,7 @@ binding = "KV_HOT"
 # Replaced by CI during deployment
 id = "a6e1dde134824cb9931795ffa3a1b2d5"
 
-[[durable_objects.bindings]]
-name = "CHECKIN_SCHEDULER"
-class_name = "CheckinScheduler"
-script_name = "api-worker"
+#[[durable_objects.bindings]]
+#name = "CHECKIN_SCHEDULER"
+#class_name = "CheckinScheduler"
+#script_name = "api-worker"
