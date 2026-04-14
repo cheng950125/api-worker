@@ -14,7 +14,7 @@ mode = "smart"
 [[d1_databases]]
 binding = "DB"
 database_name = "api-worker"
-database_id = "badf43da-5039-4326-8d0b-0185be98f761"
+database_id = "e8bacb0c-93c5-4d15-aa7f-a9688a84b91c"
 
 [[kv_namespaces]]
 binding = "KV_HOT"
