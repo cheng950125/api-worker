@@ -3,8 +3,8 @@ export type ProxyErrorPolicyMatchedSet = "return" | "disable" | "sleep" | null;
 
 export type ProxyErrorPolicySets = {
 	sleepErrorCodeSet: Set<string>;
-	disableErrorCodeSet: Set<string>;
 	returnErrorCodeSet: Set<string>;
+	disableErrorCodeSet?: Set<string>;
 };
 
 export type ProxyErrorDecision = {
@@ -14,6 +14,8 @@ export type ProxyErrorDecision = {
 	matchedSet: ProxyErrorPolicyMatchedSet;
 	normalizedErrorCode: string | null;
 };
+
+const EMPTY_ERROR_CODE_SET = new Set<string>();
 
 function normalizeMessage(value: string | null): string | null {
 	if (!value) {
@@ -97,8 +99,18 @@ export function resolveProxyErrorDecision(
 			normalizedErrorCode,
 		};
 	}
+	const matchedSleepKey = findMatchedKey(policy.sleepErrorCodeSet, lookupKeys);
+	if (matchedSleepKey) {
+		return {
+			action: "sleep",
+			lookupKeys,
+			matchedKey: matchedSleepKey,
+			matchedSet: "sleep",
+			normalizedErrorCode,
+		};
+	}
 	const matchedDisableKey = findMatchedKey(
-		policy.disableErrorCodeSet,
+		policy.disableErrorCodeSet ?? EMPTY_ERROR_CODE_SET,
 		lookupKeys,
 	);
 	if (matchedDisableKey) {
@@ -107,16 +119,6 @@ export function resolveProxyErrorDecision(
 			lookupKeys,
 			matchedKey: matchedDisableKey,
 			matchedSet: "disable",
-			normalizedErrorCode,
-		};
-	}
-	const matchedSleepKey = findMatchedKey(policy.sleepErrorCodeSet, lookupKeys);
-	if (matchedSleepKey) {
-		return {
-			action: "sleep",
-			lookupKeys,
-			matchedKey: matchedSleepKey,
-			matchedSet: "sleep",
 			normalizedErrorCode,
 		};
 	}

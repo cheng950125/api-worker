@@ -181,12 +181,6 @@ export const SettingsView = ({
 				all.add(normalized);
 			}
 		}
-		for (const code of settingsForm.channel_disable_error_codes) {
-			const normalized = String(code ?? "").trim();
-			if (normalized) {
-				all.add(normalized);
-			}
-		}
 		for (const code of settingsForm.proxy_retry_sleep_error_codes) {
 			const normalized = String(code ?? "").trim();
 			if (normalized) {
@@ -199,7 +193,7 @@ export const SettingsView = ({
 				all.add(normalized);
 			}
 		}
-		for (const code of settingsForm.channel_permanent_disable_error_codes) {
+		for (const code of settingsForm.channel_disable_error_codes) {
 			const normalized = String(code ?? "").trim();
 			if (normalized) {
 				all.add(normalized);
@@ -211,7 +205,6 @@ export const SettingsView = ({
 	}, [
 		retryErrorCodeOptions,
 		settingsForm.channel_disable_error_codes,
-		settingsForm.channel_permanent_disable_error_codes,
 		settingsForm.proxy_retry_return_error_codes,
 		settingsForm.proxy_retry_sleep_error_codes,
 	]);
@@ -558,46 +551,21 @@ export const SettingsView = ({
 						</div>
 						<div class="app-settings-row app-settings-row--stack">
 							<div class="app-settings-row__main">
-								<span class="app-settings-row__label">
-									触发临时封禁的错误码
-								</span>
+								<span class="app-settings-row__label">触发禁用的错误码</span>
 								<p class="app-settings-row__hint">
-									命中后会累计封禁次数，并按时长进入临时封禁
+									命中这些错误码会累计渠道禁用次数；中间先进入渠道临时禁用，达到阈值后禁用渠道
 								</p>
 							</div>
 							<MultiSelect
 								class="app-settings-row__control app-settings-row__control--full"
 								options={mergedRetryErrorCodeOptions}
 								value={settingsForm.channel_disable_error_codes}
-								placeholder="选择触发禁用的错误码"
+								placeholder="选择禁用的错误码"
 								searchPlaceholder="搜索错误码"
 								emptyLabel="暂无可选错误码"
 								onChange={(next) => {
 									onFormChange({
 										channel_disable_error_codes: next,
-									});
-								}}
-							/>
-						</div>
-						<div class="app-settings-row app-settings-row--stack">
-							<div class="app-settings-row__main">
-								<span class="app-settings-row__label">
-									触发永久封禁的错误码
-								</span>
-								<p class="app-settings-row__hint">
-									命中阈值后直接进入永久封禁，不再自动恢复
-								</p>
-							</div>
-							<MultiSelect
-								class="app-settings-row__control app-settings-row__control--full"
-								options={mergedRetryErrorCodeOptions}
-								value={settingsForm.channel_permanent_disable_error_codes}
-								placeholder="选择永久封禁的错误码"
-								searchPlaceholder="搜索错误码"
-								emptyLabel="暂无可选错误码"
-								onChange={(next) => {
-									onFormChange({
-										channel_permanent_disable_error_codes: next,
 									});
 								}}
 							/>
@@ -626,10 +594,10 @@ export const SettingsView = ({
 									class="app-settings-row__label"
 									for="proxy-model-failure-cooldown"
 								>
-									冷却窗口时长（分钟）
+									模型冷却时长（分钟）
 								</label>
 								<p class="app-settings-row__hint">
-									进入冷却窗口后，在该时长内跳过对应渠道；0 表示关闭冷却窗口
+									触发失败的模型；进入冷却后，该模型会在这段时间内被跳过
 								</p>
 							</div>
 							<Input
@@ -653,10 +621,10 @@ export const SettingsView = ({
 									class="app-settings-row__label"
 									for="proxy-model-failure-threshold"
 								>
-									进入冷却阈值（连续失败次数）
+									模型冷却阈值（连续失败次数）
 								</label>
 								<p class="app-settings-row__hint">
-									同一模型连续失败达到该次数才进入冷却窗口，最小为 1
+									同一渠道模型连续失败达到该次数后，渠道模型会被临时禁用
 								</p>
 							</div>
 							<Input
@@ -681,10 +649,10 @@ export const SettingsView = ({
 									class="app-settings-row__label"
 									for="channel-disable-error-threshold"
 								>
-									渠道禁用阈值（次数）
+									渠道禁用阈值（累计次数）
 								</label>
 								<p class="app-settings-row__hint">
-									命中封禁错误码累计达到该次数后，会按错误分类进入临时或永久封禁
+									命中渠道禁用码会累计到这里；未达到阈值前先进入渠道临时禁用，达到阈值后禁用渠道
 								</p>
 							</div>
 							<Input
@@ -709,11 +677,10 @@ export const SettingsView = ({
 									class="app-settings-row__label"
 									for="channel-disable-error-code-minutes"
 								>
-									命中后禁用时长（分钟）
+									渠道临时封禁时长（分钟）
 								</label>
 								<p class="app-settings-row__hint">
-									命中禁用错误码后，会立即进入临时禁用时长；设为 0
-									表示只计数不临时禁用
+									每次命中渠道禁用码且未达到禁用阈值时，渠道会按这里的时长进入临时禁用
 								</p>
 							</div>
 							<Input

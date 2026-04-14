@@ -284,7 +284,7 @@ async function recoverDisabledChannel(
 	const updatedAt = nowIso();
 	const updateResult = await db
 		.prepare(
-			"UPDATE channels SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
+			"UPDATE channels SET status = ?, auto_disable_hit_count = 0, auto_disabled_until = NULL, auto_disabled_reason_code = NULL, auto_disabled_permanent = 0, updated_at = ? WHERE id = ? AND status = ?",
 		)
 		.bind("active", updatedAt, channel.id, "disabled")
 		.run();

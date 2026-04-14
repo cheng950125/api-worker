@@ -2749,16 +2749,9 @@ proxy.all("/*", tokenAuth, async (c) => {
 	const channelDisableErrorCodeSet = buildProxyErrorCodeSet(
 		runtimeSettings.channel_disable_error_codes ?? [],
 	);
-	const channelPermanentDisableErrorCodeSet = buildProxyErrorCodeSet(
-		runtimeSettings.channel_permanent_disable_error_codes ?? [],
-	);
-	const disableActionErrorCodeSet = new Set([
-		...channelDisableErrorCodeSet,
-		...channelPermanentDisableErrorCodeSet,
-	]);
 	const dispatchRetryConfig: DispatchRetryConfig = {
 		sleepMs: retrySleepMs,
-		disableErrorCodes: Array.from(disableActionErrorCodeSet),
+		disableErrorCodes: Array.from(channelDisableErrorCodeSet),
 		returnErrorCodes: Array.from(retryReturnErrorCodeSet),
 		sleepErrorCodes: Array.from(retrySleepErrorCodeSet),
 	};
@@ -3523,7 +3516,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 		resolveProxyErrorDecision(
 			{
 				sleepErrorCodeSet: retrySleepErrorCodeSet,
-				disableErrorCodeSet: disableActionErrorCodeSet,
+				disableErrorCodeSet: channelDisableErrorCodeSet,
 				returnErrorCodeSet: retryReturnErrorCodeSet,
 			},
 			errorCode,
@@ -3538,7 +3531,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 		const decision = resolveProxyErrorDecision(
 			{
 				sleepErrorCodeSet: retrySleepErrorCodeSet,
-				disableErrorCodeSet: disableActionErrorCodeSet,
+				disableErrorCodeSet: channelDisableErrorCodeSet,
 				returnErrorCodeSet: retryReturnErrorCodeSet,
 			},
 			options.errorCode,
@@ -3571,15 +3564,10 @@ proxy.all("/*", tokenAuth, async (c) => {
 			{
 				disableDurationSeconds: channelDisableDurationSeconds,
 				disableThreshold: channelDisableThreshold,
-				permanentDisable:
-					channelPermanentDisableErrorCodeSet.has(normalizedErrorCode),
 			},
 			nowSeconds,
 		);
-		if (
-			disableResult.channelTempDisabled ||
-			disableResult.channelPermanentlyDisabled
-		) {
+		if (disableResult.channelTempDisabled || disableResult.channelDisabled) {
 			await invalidateSelectionHotCache(c.env.KV_HOT);
 		}
 	};
@@ -3594,7 +3582,7 @@ proxy.all("/*", tokenAuth, async (c) => {
 			options.errorCode,
 			options.errorMessage,
 		);
-		if (action === "disable" || action === "return") {
+		if (action !== "retry") {
 			return;
 		}
 		if (!shouldCooldown(options.upstreamStatus, options.errorCode)) {

@@ -56,8 +56,6 @@ settings.get("/", async (c) => {
 			runtimeSettings.model_failure_cooldown_threshold,
 		proxy_retry_return_error_codes: runtimeSettings.retry_return_error_codes,
 		channel_disable_error_codes: runtimeSettings.channel_disable_error_codes,
-		channel_permanent_disable_error_codes:
-			runtimeSettings.channel_permanent_disable_error_codes,
 		channel_disable_error_threshold:
 			runtimeSettings.channel_disable_error_threshold,
 		channel_disable_error_code_minutes:
@@ -89,7 +87,6 @@ settings.put("/", async (c) => {
 		retry_sleep_error_codes?: string[];
 		retry_return_error_codes?: string[];
 		channel_disable_error_codes?: string[];
-		channel_permanent_disable_error_codes?: string[];
 		channel_disable_error_threshold?: number;
 		channel_disable_error_code_minutes?: number;
 		zero_completion_as_error_enabled?: boolean;
@@ -227,22 +224,6 @@ settings.put("/", async (c) => {
 			);
 		}
 		runtimePatch.channel_disable_error_codes = normalized;
-		runtimeTouched = true;
-	}
-
-	if (body.channel_permanent_disable_error_codes !== undefined) {
-		const normalized = normalizeErrorCodeList(
-			body.channel_permanent_disable_error_codes,
-		);
-		if (!normalized) {
-			return jsonError(
-				c,
-				400,
-				"invalid_channel_permanent_disable_error_codes",
-				"invalid_channel_permanent_disable_error_codes",
-			);
-		}
-		runtimePatch.channel_permanent_disable_error_codes = normalized;
 		runtimeTouched = true;
 	}
 

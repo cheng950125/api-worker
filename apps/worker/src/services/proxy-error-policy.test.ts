@@ -59,4 +59,17 @@ describe("proxy-error-policy", () => {
 		);
 		expect(action).toBe("sleep");
 	});
+
+	it("returns retry for unmatched errors", () => {
+		const action = resolveProxyErrorAction(
+			{
+				sleepErrorCodeSet: new Set(),
+				disableErrorCodeSet: new Set(),
+				returnErrorCodeSet: new Set(),
+			},
+			"proxy_upstream_fetch_exception",
+			null,
+		);
+		expect(action).toBe("retry");
+	});
 });

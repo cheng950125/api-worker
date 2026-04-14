@@ -192,9 +192,6 @@ const buildRecommendedSettingsForm = (
 	channel_disable_error_codes: [
 		...initialSettingsForm.channel_disable_error_codes,
 	],
-	channel_permanent_disable_error_codes: [
-		...initialSettingsForm.channel_permanent_disable_error_codes,
-	],
 	proxy_retry_sleep_error_codes: [
 		...initialSettingsForm.proxy_retry_sleep_error_codes,
 	],
@@ -799,15 +796,10 @@ const App = () => {
 			),
 			channel_disable_error_codes:
 				runtimeSettings?.channel_disable_error_codes ?? [
-					"do_request_failed",
-					"proxy_upstream_fetch_exception",
-					"model_not_found",
-					"stream_options_unsupported",
-				],
-			channel_permanent_disable_error_codes:
-				runtimeSettings?.channel_permanent_disable_error_codes ?? [
-					"upstream_http_401",
-					"upstream_http_403",
+					"account_deactivated",
+					"insufficient_balance",
+					"insufficient_user_quota",
+					"permission_error",
 				],
 			channel_disable_error_threshold: String(
 				runtimeSettings?.channel_disable_error_threshold ?? 3,
@@ -1624,17 +1616,14 @@ const App = () => {
 					),
 				);
 			};
-			const channelDisableErrorCodes = normalizeErrorCodeList(
-				settingsForm.channel_disable_error_codes,
-			);
 			const retrySleepErrorCodes = normalizeErrorCodeList(
 				settingsForm.proxy_retry_sleep_error_codes,
 			);
 			const retryReturnErrorCodes = normalizeErrorCodeList(
 				settingsForm.proxy_retry_return_error_codes,
 			);
-			const channelPermanentDisableErrorCodes = normalizeErrorCodeList(
-				settingsForm.channel_permanent_disable_error_codes,
+			const channelDisableErrorCodes = normalizeErrorCodeList(
+				settingsForm.channel_disable_error_codes,
 			);
 			const streamUsageMode = settingsForm.proxy_stream_usage_mode
 				.trim()
@@ -1819,7 +1808,6 @@ const App = () => {
 				channel_recovery_probe_schedule_time: channelRecoveryProbeScheduleTime,
 				proxy_model_failure_cooldown_minutes: failureCooldownMinutes,
 				proxy_model_failure_cooldown_threshold: failureCooldownThreshold,
-				channel_disable_error_codes: channelDisableErrorCodes,
 				channel_disable_error_threshold: channelDisableErrorThreshold,
 				channel_disable_error_code_minutes: channelDisableErrorCodeMinutes,
 				proxy_upstream_timeout_ms: upstreamTimeoutMs,
@@ -1827,8 +1815,7 @@ const App = () => {
 				proxy_retry_sleep_ms: retrySleepMs,
 				proxy_retry_sleep_error_codes: retrySleepErrorCodes,
 				proxy_retry_return_error_codes: retryReturnErrorCodes,
-				channel_permanent_disable_error_codes:
-					channelPermanentDisableErrorCodes,
+				channel_disable_error_codes: channelDisableErrorCodes,
 				proxy_zero_completion_as_error_enabled:
 					settingsForm.proxy_zero_completion_as_error_enabled,
 				proxy_stream_usage_mode: streamUsageMode,

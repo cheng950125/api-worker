@@ -57,14 +57,10 @@ export const initialSettingsForm: SettingsForm = {
 	proxy_model_failure_cooldown_minutes: "720",
 	proxy_model_failure_cooldown_threshold: "3",
 	channel_disable_error_codes: [
-		"do_request_failed",
-		"proxy_upstream_fetch_exception",
-		"model_not_found",
-		"stream_options_unsupported",
-	],
-	channel_permanent_disable_error_codes: [
-		"upstream_http_401",
-		"upstream_http_403",
+		"account_deactivated",
+		"insufficient_balance",
+		"insufficient_user_quota",
+		"permission_error",
 	],
 	channel_disable_error_threshold: "3",
 	channel_disable_error_code_minutes: "1440",

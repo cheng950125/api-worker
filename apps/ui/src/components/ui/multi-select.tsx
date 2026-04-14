@@ -52,15 +52,25 @@ export const MultiSelect = ({
 					}`;
 	const filteredOptions = useMemo(() => {
 		const keyword = search.trim().toLowerCase();
-		if (!keyword) {
-			return options;
+		const matchedOptions =
+			keyword.length === 0
+				? options
+				: options.filter((option) => {
+						const label = option.label.toLowerCase();
+						const valueText = option.value.toLowerCase();
+						return label.includes(keyword) || valueText.includes(keyword);
+					});
+		const selected: MultiSelectOption[] = [];
+		const unselected: MultiSelectOption[] = [];
+		for (const option of matchedOptions) {
+			if (valueSet.has(option.value)) {
+				selected.push(option);
+				continue;
+			}
+			unselected.push(option);
 		}
-		return options.filter((option) => {
-			const label = option.label.toLowerCase();
-			const valueText = option.value.toLowerCase();
-			return label.includes(keyword) || valueText.includes(keyword);
-		});
-	}, [options, search]);
+		return [...selected, ...unselected];
+	}, [options, search, valueSet]);
 	const toggleValue = (option: MultiSelectOption) => {
 		const next = new Set(valueSet);
 		if (next.has(option.value)) {

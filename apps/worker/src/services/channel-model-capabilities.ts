@@ -31,14 +31,43 @@ export type RecordModelErrorResult = {
 type RecordChannelDisableOptions = {
 	disableDurationSeconds: number;
 	disableThreshold: number;
-	permanentDisable: boolean;
 };
 
 export type RecordChannelDisableResult = {
 	channelTempDisabled: boolean;
-	channelPermanentlyDisabled: boolean;
+	channelDisabled: boolean;
 	hitCount: number;
 };
+
+export function resolveChannelDisableState(
+	hitCount: number,
+	options: RecordChannelDisableOptions,
+	nowSeconds: number,
+): {
+	channelTempDisabled: boolean;
+	channelDisabled: boolean;
+	autoDisabledUntil: number | null;
+} {
+	const disableDurationSeconds = Math.max(
+		0,
+		Math.floor(options.disableDurationSeconds),
+	);
+	const disableThreshold = Math.max(1, Math.floor(options.disableThreshold));
+	if (hitCount >= disableThreshold) {
+		return {
+			channelTempDisabled: false,
+			channelDisabled: true,
+			autoDisabledUntil: null,
+		};
+	}
+	const autoDisabledUntil =
+		disableDurationSeconds > 0 ? nowSeconds + disableDurationSeconds : null;
+	return {
+		channelTempDisabled: autoDisabledUntil !== null,
+		channelDisabled: false,
+		autoDisabledUntil,
+	};
+}
 
 function toSafeInt(value: unknown): number {
 	const parsed = Number(value ?? 0);
@@ -310,7 +339,6 @@ export async function recordChannelDisableHit(
 		Math.floor(options.disableDurationSeconds),
 	);
 	const disableThreshold = Math.max(1, Math.floor(options.disableThreshold));
-	const permanentDisable = options.permanentDisable === true;
 	const timestamp = nowIso();
 	const incrementResult = await db
 		.prepare(
@@ -335,7 +363,7 @@ export async function recordChannelDisableHit(
 			String(existing?.status ?? "") === "disabled";
 		return {
 			channelTempDisabled: false,
-			channelPermanentlyDisabled: existingDisabled,
+			channelDisabled: existingDisabled,
 			hitCount: existingHitCount,
 		};
 	}
@@ -353,45 +381,43 @@ export async function recordChannelDisableHit(
 	if (toSafeInt(row?.auto_disabled_permanent) > 0) {
 		return {
 			channelTempDisabled: false,
-			channelPermanentlyDisabled: true,
+			channelDisabled: true,
 			hitCount: nextHitCount,
 		};
 	}
-	if (nextHitCount < disableThreshold) {
-		return {
-			channelTempDisabled: false,
-			channelPermanentlyDisabled: false,
-			hitCount: nextHitCount,
-		};
-	}
-
-	if (permanentDisable) {
-		const disableResult = await db
-			.prepare(
-				"UPDATE channels SET auto_disabled_until = NULL, auto_disabled_reason_code = ?, auto_disabled_permanent = 1, updated_at = ? WHERE id = ? AND status = ?",
-			)
-			.bind(errorCode, timestamp, channelId, "active")
-			.run();
-		return {
-			channelTempDisabled: false,
-			channelPermanentlyDisabled: Number(disableResult.meta?.changes ?? 0) > 0,
-			hitCount: nextHitCount,
-		};
-	}
-
-	const disabledUntil =
-		disableDurationSeconds > 0 ? nowSeconds + disableDurationSeconds : null;
-	const tempDisableResult = await db
-		.prepare(
-			"UPDATE channels SET auto_disabled_until = ?, auto_disabled_reason_code = ?, auto_disabled_permanent = 0, updated_at = ? WHERE id = ? AND status = ? AND COALESCE(auto_disabled_permanent, 0) = 0",
-		)
-		.bind(disabledUntil, errorCode, timestamp, channelId, "active")
-		.run();
+	const nextState = resolveChannelDisableState(
+		nextHitCount,
+		{
+			disableDurationSeconds,
+			disableThreshold,
+		},
+		nowSeconds,
+	);
+	const updateResult = nextState.channelDisabled
+		? await db
+				.prepare(
+					"UPDATE channels SET status = ?, auto_disabled_until = NULL, auto_disabled_reason_code = ?, auto_disabled_permanent = 0, updated_at = ? WHERE id = ? AND status = ?",
+				)
+				.bind("disabled", errorCode, timestamp, channelId, "active")
+				.run()
+		: await db
+				.prepare(
+					"UPDATE channels SET auto_disabled_until = ?, auto_disabled_reason_code = ?, auto_disabled_permanent = 0, updated_at = ? WHERE id = ? AND status = ? AND COALESCE(auto_disabled_permanent, 0) = 0",
+				)
+				.bind(
+					nextState.autoDisabledUntil,
+					errorCode,
+					timestamp,
+					channelId,
+					"active",
+				)
+				.run();
 	return {
 		channelTempDisabled:
-			Number(tempDisableResult.meta?.changes ?? 0) > 0 &&
-			disabledUntil !== null,
-		channelPermanentlyDisabled: false,
+			Number(updateResult.meta?.changes ?? 0) > 0 &&
+			nextState.channelTempDisabled,
+		channelDisabled:
+			Number(updateResult.meta?.changes ?? 0) > 0 && nextState.channelDisabled,
 		hitCount: nextHitCount,
 	};
 }
