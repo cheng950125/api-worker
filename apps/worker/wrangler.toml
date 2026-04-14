@@ -14,12 +14,12 @@ mode = "smart"
 [[d1_databases]]
 binding = "DB"
 database_name = "api-worker"
-database_id = "00000000-0000-0000-0000-000000000000"
+database_id = "badf43da-5039-4326-8d0b-0185be98f761"
 
 [[kv_namespaces]]
 binding = "KV_HOT"
 # Replaced by CI during deployment
-id = "00000000000000000000000000000000"
+id = "a6e1dde134824cb9931795ffa3a1b2d5"
 
 [assets]
 directory = "../ui/dist"
